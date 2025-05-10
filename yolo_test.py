@@ -3,10 +3,10 @@ import cv2
 import matplotlib.pyplot as plt
 
 # load model
-model = YOLO("./runs/detect/train8/weights/best.pt")
+model = YOLO("/Users/rin/Documents/畢業專題/YOLO/yolo-3/weights/best.pt")
 
 # read video file
-cap = cv2.VideoCapture("./video/test/5min-1/output_left.mp4")
+cap = cv2.VideoCapture("/Users/rin/Documents/畢業專題/YOLO/yolo-3/videos/test/5-min-1/output_right.mp4")
 
 original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
