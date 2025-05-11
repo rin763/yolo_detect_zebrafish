@@ -2,11 +2,11 @@ import cv2
 import os
 from pathlib import Path
 
-# input_dir = "/Users/rin/Documents/畢業專題/YOLO/yolo-3/datasets/images/train"
-# output_dir = "/Users/rin/Documents/畢業專題/YOLO/yolo-3/datasets/preprocessed_images/train"
+# input_dir = "./datasets/images/train"
+# output_dir = "./datasets/preprocessed_images/train"
 
-input_dir = "/Users/rin/Documents/畢業專題/YOLO/yolo-3/datasets/images/val"
-output_dir = "/Users/rin/Documents/畢業專題/YOLO/yolo-3/preprocessed_datasets_2/images/val"
+input_dir = "./datasets/images/val"
+output_dir = "./preprocessed_datasets_2/images/val"
 Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
