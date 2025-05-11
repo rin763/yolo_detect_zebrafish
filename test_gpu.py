@@ -16,5 +16,5 @@ print("Num CPUs Available: ", len(tf.config.list_physical_devices('CPU')))
 
 import torch
 
-print(torch.backends.mps.is_available())  # Trueなら使える
-print(torch.backends.mps.is_built())      # TrueならMPSサポートビルド済み
+print(torch.backends.mps.is_available()) 
+print(torch.backends.mps.is_built()) 

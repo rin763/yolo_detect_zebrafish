@@ -1,7 +1,0 @@
-
-path: /Users/rin/Documents/畢業專題/YOLO/yolo-3/datasets
-train: images/train
-val: images/val
-
-nc: 1
-names: ['fish']

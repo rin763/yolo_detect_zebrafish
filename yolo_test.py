@@ -16,7 +16,7 @@ output_height = 1080
 output_width = int((output_height / original_height) * original_width)
 
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter('out2.mp4', fourcc, fps, (output_width, output_height))
+out = cv2.VideoWriter('./video/yolo_result.mp4', fourcc, fps, (output_width, output_height))
   
 # Loop through the video frames
 while cap.isOpened():

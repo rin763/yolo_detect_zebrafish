@@ -2,7 +2,7 @@ from ultralytics import YOLO
 import os
 
 # load model
-model = YOLO("./runs/detect/train8/weights/best.pt")
+model = YOLO("./runs/detect/train13/weights/best.pt")
 
 # 未ラベル画像のディレクトリ
 unlabeled_dir = "./images"
