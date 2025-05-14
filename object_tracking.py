@@ -99,6 +99,16 @@ class ObjectTracker:
     def process_video(self, video_path):
         cap = cv2.VideoCapture(video_path)
         
+        # 動画の設定を取得
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        
+        # 出力用のVideoWriterを設定
+        output_path = "./video/tracking_result.mp4"
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -139,13 +149,18 @@ class ObjectTracker:
                                   (int(x1), int(y1)-10), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             
+            # フレームを保存
+            out.write(frame)
+            
             # 結果の表示
             cv2.imshow("Tracking", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
                 
         cap.release()
+        out.release()
         cv2.destroyAllWindows()
+        print(f"Tracking result saved to: {output_path}")
 
 if __name__ == "__main__":
     # モデルのパスを指定
