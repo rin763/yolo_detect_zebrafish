@@ -21,8 +21,8 @@ class TrackingDataset(Dataset):
                 
                 # シーケンスとターゲットを作成
                 for i in range(len(track_data) - sequence_length):
-                    sequence = track_data[i:i+sequence_length]
-                    target = track_data[i+sequence_length]
+                    sequence = track_data[i:i+sequence_length,1:5]
+                    target = track_data[i+sequence_length,1:5]
                     self.sequences.append(sequence)
                     self.targets.append(target)
     
@@ -128,8 +128,8 @@ def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=3
 if __name__ == "__main__":
     # パスの設定
     video_paths = [
-        "./video/training/30min/output_left.mp4",
-        "./video/training/30min/output_right.mp4"
+        "./video/processed_train_video_left.mp4",
+        "./video/processed_train_video_right.mp4"
     ]
     model_path = "./train_results/weights/best.pt"
     train_data_dir = "train_data"
