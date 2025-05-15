@@ -3,7 +3,7 @@ import numpy as np
 import os
 
 # 入力動画パスと出力動画パス
-input_video_path = './video/training/30min/output_left.mp4'
+input_video_path = '/Users/rin/Documents/畢業專題/YOLO/video/training/30min/output_left.mp4'
 output_video_path = './video/processed_train_video_left.mp4'
 
 # シャープ化カーネル

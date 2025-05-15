@@ -4,6 +4,32 @@ import torch
 import torch.nn as nn
 from ultralytics import YOLO
 from collections import deque
+from torch.utils.data import Dataset, DataLoader
+import os
+
+class TrackingDataset(Dataset):
+    def __init__(self, data_dir, sequence_length=10):
+        self.sequence_length = sequence_length
+        self.sequences = []
+        self.targets = []
+        
+        # データディレクトリから時系列データを読み込む
+        for track_file in os.listdir(data_dir):
+            if track_file.endswith('.npy'):
+                track_data = np.load(os.path.join(data_dir, track_file))
+                
+                # シーケンスとターゲットを作成
+                for i in range(len(track_data) - sequence_length):
+                    sequence = track_data[i:i+sequence_length]
+                    target = track_data[i+sequence_length]
+                    self.sequences.append(sequence)
+                    self.targets.append(target)
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        return torch.FloatTensor(self.sequences[idx]), torch.FloatTensor(self.targets[idx])
 
 class LSTMTracker(nn.Module):
     def __init__(self, input_size=4, hidden_size=64, num_layers=2):
@@ -16,13 +42,91 @@ class LSTMTracker(nn.Module):
         predictions = self.fc(lstm_out[:, -1, :])
         return predictions
 
+    def train_model(self, train_data_dir, val_data_dir, batch_size=32, epochs=100, learning_rate=0.001):
+        # データセットの準備
+        print("Loading training data...")
+        train_dataset = TrackingDataset(train_data_dir)
+        print(f"Training samples: {len(train_dataset)}")
+        
+        print("Loading validation data...")
+        val_dataset = TrackingDataset(val_data_dir)
+        print(f"Validation samples: {len(val_dataset)}")
+        
+        if len(train_dataset) == 0 or len(val_dataset) == 0:
+            print("Error: No training or validation data found!")
+            return
+        
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size)
+        
+        # 損失関数とオプティマイザの設定
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(self.parameters(), lr=learning_rate)
+        
+        # 最良の検証損失を記録
+        best_val_loss = float('inf')
+        
+        print("\nStarting training...")
+        # トレーニングループ
+        for epoch in range(epochs):
+            # 訓練フェーズ
+            self.train()
+            train_loss = 0.0
+            train_batches = 0
+            
+            for sequences, targets in train_loader:
+                optimizer.zero_grad()
+                outputs = self(sequences)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+                train_batches += 1
+                
+                # バッチごとの進捗表示
+                if train_batches % 10 == 0:
+                    print(f"Epoch {epoch+1}/{epochs}, Batch {train_batches}, Loss: {loss.item():.4f}")
+            
+            # 検証フェーズ
+            self.eval()
+            val_loss = 0.0
+            val_batches = 0
+            
+            with torch.no_grad():
+                for sequences, targets in val_loader:
+                    outputs = self(sequences)
+                    loss = criterion(outputs, targets)
+                    val_loss += loss.item()
+                    val_batches += 1
+            
+            # エポックごとの結果を表示
+            avg_train_loss = train_loss / len(train_loader)
+            avg_val_loss = val_loss / len(val_loader)
+            print(f"\nEpoch {epoch+1}/{epochs}:")
+            print(f"Training Loss: {avg_train_loss:.4f}")
+            print(f"Validation Loss: {avg_val_loss:.4f}")
+            
+            # モデルの保存（検証損失が改善した場合）
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                torch.save(self.state_dict(), 'best_lstm_model.pth')
+                print(f"Model saved! New best validation loss: {best_val_loss:.4f}")
+            
+            print("-" * 50)
+        
+        print("\nTraining completed!")
+        print(f"Best validation loss: {best_val_loss:.4f}")
+
 class ObjectTracker:
-    def __init__(self, model_path, sequence_length=10):
+    def __init__(self, model_path, lstm_model_path=None, sequence_length=10):
         # YOLOモデルの読み込み
         self.yolo = YOLO(model_path)
         
         # LSTMモデルの初期化
         self.lstm = LSTMTracker()
+        if lstm_model_path and os.path.exists(lstm_model_path):
+            self.lstm.load_state_dict(torch.load(lstm_model_path))
+            print(f"Loaded LSTM model from {lstm_model_path}")
         self.sequence_length = sequence_length
         
         # 物体の追跡履歴を保存
@@ -105,7 +209,7 @@ class ObjectTracker:
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         
         # 出力用のVideoWriterを設定
-        output_path = "./video/tracking_result.mp4"
+        output_path = "video/yolo_tracking_result.mp4"
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
@@ -149,7 +253,7 @@ class ObjectTracker:
                                   (int(x1), int(y1)-10), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             
-            # フレームを保存
+            # フレームを出力ファイルに書き込み
             out.write(frame)
             
             # 結果の表示
@@ -160,17 +264,71 @@ class ObjectTracker:
         cap.release()
         out.release()
         cv2.destroyAllWindows()
-        print(f"Tracking result saved to: {output_path}")
+        print(f"Tracking result saved to {output_path}")
+
+    def collect_training_data(self, video_path, output_dir):
+        """
+        動画から教師データを自動生成
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        cap = cv2.VideoCapture(video_path)
+        frame_count = 0
+        track_data = {}  # 物体IDごとの追跡データを保存
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            # YOLOで物体検出
+            results = self.yolo.track(frame, persist=True)
+            
+            if results[0].boxes is not None:
+                for box in results[0].boxes:
+                    # 物体の位置情報を取得
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    center_x = (x1 + x2) / 2
+                    center_y = (y1 + y2) / 2
+                    width = x2 - x1
+                    height = y2 - y1
+                    
+                    # 物体のIDを取得
+                    obj_id = int(box.id.item()) if box.id is not None else None
+                    
+                    if obj_id is not None:
+                        # 追跡データを保存
+                        if obj_id not in track_data:
+                            track_data[obj_id] = []
+                        
+                        track_data[obj_id].append([frame_count, center_x, center_y, width, height])
+            
+            frame_count += 1
+            
+            # 進捗表示
+            if frame_count % 100 == 0:
+                print(f"Processed {frame_count} frames")
+        
+        # 追跡データを保存
+        for obj_id, data in track_data.items():
+            if len(data) >= self.sequence_length:  # 十分なデータがある場合のみ保存
+                data_array = np.array(data)
+                output_path = os.path.join(output_dir, f"track_{obj_id}.npy")
+                np.save(output_path, data_array)
+                print(f"Saved tracking data for object {obj_id} with {len(data)} frames")
+        
+        cap.release()
+        print(f"Data collection completed. Saved {len(track_data)} object tracks.")
 
 if __name__ == "__main__":
     # モデルのパスを指定
-    model_path = "./train_results/weights/best.pt"  # あなたのYOLOモデルのパスに変更してください
+    model_path = "./train_results/weights/best.pt"
+    lstm_model_path = "best_lstm_model.pth"  # 学習済みLSTMモデルのパス
     
     # トラッカーの初期化
-    tracker = ObjectTracker(model_path)
+    tracker = ObjectTracker(model_path, lstm_model_path)
     
     # 動画のパスを指定
-    video_path = "./video/processed_video.mp4"  # 処理したい動画のパスに変更してください
+    video_path = "./video/processed_video.mp4"
     
     # 動画の処理開始
     tracker.process_video(video_path) 
