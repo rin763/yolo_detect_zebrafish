@@ -1,0 +1,37 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Jupyter/IPython checkpoints
+.ipynb_checkpoints/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# PyTorch model files
+*.pt
+*.pth
+
+# NumPy binary files
+*.npy
+*.npz
+
+# Training data folders
+train_data/
+val_data/
+
+# VSCode settings (optional)
+.vscode/
+
+# Log files
+*.log
+
+# Environment / virtualenv folders (if any)
+env/
+venv/
+.venv/
+
+*.mp4
+*.txt
+*.jpg

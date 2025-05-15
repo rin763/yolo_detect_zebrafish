@@ -1,10 +1,17 @@
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
+from ultralytics import YOLO
+from collections import deque
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
 import os
 from object_tracking import LSTMTracker, ObjectTracker
 
+from tqdm import tqdm
+#   import shutil
+#       if not os.path.exists(dst):
+#            shutil.move(src, dst)
 class TrackingDataset(Dataset):
     def __init__(self, data_dir, sequence_length=10):
         self.sequence_length = sequence_length
@@ -18,8 +25,8 @@ class TrackingDataset(Dataset):
                 
                 # シーケンスとターゲットを作成
                 for i in range(len(track_data) - sequence_length):
-                    sequence = track_data[i:i+sequence_length]
-                    target = track_data[i+sequence_length]
+                    sequence = track_data[i:i+sequence_length, :4]
+                    target = track_data[i+sequence_length, :4]
                     self.sequences.append(sequence)
                     self.targets.append(target)
     
@@ -29,130 +36,69 @@ class TrackingDataset(Dataset):
     def __getitem__(self, idx):
         return torch.FloatTensor(self.sequences[idx]), torch.FloatTensor(self.targets[idx])
 
-def collect_and_split_data(model_path, video_paths, output_base_dir="data"):
-    """
-    Collect data from videos and split into training and validation sets
-    """
-    # Check if model file exists
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"YOLO model file not found: {model_path}")
+def collect_training_data(video_paths, output_dir, model_path):
+    """教師データを収集する関数"""
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Check if video files exist
-    for video_path in video_paths:
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
+    # トラッカーの初期化
+    tracker = ObjectTracker(model_path)
     
-    # Create output directories
-    train_dir = os.path.join(output_base_dir, "train_data")
-    val_dir = os.path.join(output_base_dir, "val_data")
-    os.makedirs(train_dir, exist_ok=True)
-    os.makedirs(val_dir, exist_ok=True)
+    # 各動画からデータを収集
+    for i, video_path in enumerate(video_paths):
+        print(f"\nCollecting data from video {i+1}/{len(video_paths)}: {video_path}")
+        tracker.collect_training_data(video_path, output_dir)
     
-    # Initialize tracker
-    try:
-        tracker = ObjectTracker(model_path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to initialize tracker: {str(e)}")
-    
-    # Create temporary directory for data collection
-    temp_dir = os.path.join(output_base_dir, "temp_data")
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # Collect data from each video
-    total_tracks = 0
-    for video_path in video_paths:
-        print(f"\nProcessing video: {video_path}")
-        try:
-            tracker.collect_training_data(video_path, temp_dir)
-            # Check number of collected tracks
-            track_files = [f for f in os.listdir(temp_dir) if f.endswith('.npy')]
-            total_tracks += len(track_files)
-            print(f"Collected {len(track_files)} tracks from {video_path}")
-        except Exception as e:
-            print(f"Warning: Error occurred while processing video {video_path}: {str(e)}")
-            continue
-    
-    if total_tracks == 0:
-        raise RuntimeError("No data collected from any video.")
-    
-    # Split collected data into training and validation sets
-    track_files = [f for f in os.listdir(temp_dir) if f.endswith('.npy')]
-    if not track_files:
-        raise RuntimeError("No data collected.")
-    
-    np.random.shuffle(track_files)  # Random shuffle
-    
-    # Split with 8:2 ratio
-    split_idx = int(len(track_files) * 0.8)
-    train_files = track_files[:split_idx]
-    val_files = track_files[split_idx:]
-    
-    # Move files to respective directories
-    try:
-        for file in train_files:
-            src = os.path.join(temp_dir, file)
-            dst = os.path.join(train_dir, file)
-            os.rename(src, dst)
-        
-        for file in val_files:
-            src = os.path.join(temp_dir, file)
-            dst = os.path.join(val_dir, file)
-            os.rename(src, dst)
-    except Exception as e:
-        raise RuntimeError(f"Error occurred while splitting data: {str(e)}")
-    
-    # Remove temporary directory
-    try:
-        os.rmdir(temp_dir)
-    except Exception as e:
-        print(f"Warning: Failed to remove temporary directory: {str(e)}")
-    
-    print(f"\nData collection and splitting completed:")
-    print(f"Training samples: {len(train_files)}")
-    print(f"Validation samples: {len(val_files)}")
-    
-    return train_dir, val_dir
+    print("\nData collection completed!")
 
-def train_model(model, train_data_dir, val_data_dir, batch_size=32, epochs=100, learning_rate=0.001):
-    # Prepare datasets
+def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=32, epochs=100, learning_rate=0.001):
+    """LSTMモデルをトレーニングする関数"""
+    # モデルの初期化
+    #model = LSTMTracker()
+
+    ### for cuda use
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    ## FOR MODEL TO USE CUDA
+    model = LSTMTracker().to(device)
+
+    # データセットの準備
     print("Loading training data...")
-    try:
-        train_dataset = TrackingDataset(train_data_dir)
-        print(f"Training samples: {len(train_dataset)}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load training data: {str(e)}")
+    train_dataset = TrackingDataset(train_data_dir)
+    print(f"Training samples: {len(train_dataset)}")
     
     print("Loading validation data...")
-    try:
-        val_dataset = TrackingDataset(val_data_dir)
-        print(f"Validation samples: {len(val_dataset)}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load validation data: {str(e)}")
+    val_dataset = TrackingDataset(val_data_dir)
+    print(f"Validation samples: {len(val_dataset)}")
     
-    if len(train_dataset) == 0:
-        raise RuntimeError("Training dataset is empty.")
-    if len(val_dataset) == 0:
-        raise RuntimeError("Validation dataset is empty.")
+    if len(train_dataset) == 0 or len(val_dataset) == 0:
+        print("Error: No training or validation data found!")
+        return
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
     
-    # Set up loss function and optimizer
+    # 損失関数とオプティマイザの設定
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     
-    # Track best validation loss
+    # 最良の検証損失を記録
     best_val_loss = float('inf')
     
     print("\nStarting training...")
-    # Training loop
+    # トレーニングループ
     for epoch in range(epochs):
-        # Training phase
+        # 訓練フェーズ
         model.train()
         train_loss = 0.0
         train_batches = 0
-        
-        for sequences, targets in train_loader:
+
+        ## tqdm for progressing bar
+        for sequences, targets in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{epochs}"):
+            ## for cuda use
+            sequences = sequences.to(device)
+            targets = targets.to(device)
+
             optimizer.zero_grad()
             outputs = model(sequences)
             loss = criterion(outputs, targets)
@@ -161,37 +107,39 @@ def train_model(model, train_data_dir, val_data_dir, batch_size=32, epochs=100, 
             train_loss += loss.item()
             train_batches += 1
             
-            # Show progress every 10 batches
+            # バッチごとの進捗表示
             if train_batches % 10 == 0:
                 print(f"Epoch {epoch+1}/{epochs}, Batch {train_batches}, Loss: {loss.item():.4f}")
         
-        # Validation phase
+        # 検証フェーズ
         model.eval()
         val_loss = 0.0
         val_batches = 0
         
         with torch.no_grad():
-            for sequences, targets in val_loader:
+            ## tqdm for progressing bar
+            for sequences, targets in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}/{epochs}"):
+                ## for cuda use
+                sequences = sequences.to(device)
+                targets = targets.to(device)
+
                 outputs = model(sequences)
                 loss = criterion(outputs, targets)
                 val_loss += loss.item()
                 val_batches += 1
         
-        # Show epoch results
+        # エポックごとの結果を表示
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
         print(f"\nEpoch {epoch+1}/{epochs}:")
         print(f"Training Loss: {avg_train_loss:.4f}")
         print(f"Validation Loss: {avg_val_loss:.4f}")
         
-        # Save model if validation loss improved
+        # モデルの保存（検証損失が改善した場合）
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            try:
-                torch.save(model.state_dict(), 'best_lstm_model.pth')
-                print(f"Model saved! New best validation loss: {best_val_loss:.4f}")
-            except Exception as e:
-                print(f"Warning: Failed to save model: {str(e)}")
+            torch.save(model.state_dict(), model_save_path)
+            print(f"Model saved! New best validation loss: {best_val_loss:.4f}")
         
         print("-" * 50)
     
@@ -199,34 +147,47 @@ def train_model(model, train_data_dir, val_data_dir, batch_size=32, epochs=100, 
     print(f"Best validation loss: {best_val_loss:.4f}")
 
 if __name__ == "__main__":
-    try:
-        # YOLO model path
-        model_path = "./train_results/weights/best.pt"
+    # パスの設定
+    model_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\train_results\weights\best.pt"
         
-        # Video paths
-        video_paths = [
-            "./video/processed_train_video_left.mp4",
-            "./video/processed_train_video_right.mp4"
-        ]
+    # Video paths
+    video_paths = [
+        r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_left.mp4",
+        r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_right.mp4"
+    ]
+    #train_data_dir = "train_data"
+    #val_data_dir = "val_data"
+    #model_save_path = "best_lstm_model.pth"
+
+    ### need to change path
+    train_data_dir=r"C:\Users\et439\OneDrive\桌面\project\Rin\data\train_data"
+    val_data_dir= r"C:\Users\et439\OneDrive\桌面\project\Rin\data\val_data"
+    model_save_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\data\models\best_lstm_model.pth"
+
+    # 教師データの収集
+    collect_training_data(video_paths, train_data_dir, model_path)
+    
+    # データを訓練用と検証用に分割
+    os.makedirs(val_data_dir, exist_ok=True)
+    track_files = os.listdir(train_data_dir)
+    val_count = int(len(track_files) * 0.2)
+    
+    for i, file in enumerate(track_files):
+        if i < val_count:
+            src = os.path.join(train_data_dir, file)
+            dst = os.path.join(val_data_dir, file)
+            #
+            if os.path.exists(dst):
+                os.remove(dst)
+            os.rename(src, dst)
+    
+    # LSTMモデルのトレーニング
+    train_lstm_model(
+        train_data_dir=train_data_dir,
+        val_data_dir=val_data_dir,
+        model_save_path=model_save_path,
         
-        # Collect and split data
-        train_data_dir, val_data_dir = collect_and_split_data(model_path, video_paths)
-        
-        # Initialize model
-        model = LSTMTracker()
-        
-        # Start training
-        train_model(
-            model=model,
-            train_data_dir=train_data_dir,
-            val_data_dir=val_data_dir,
-            batch_size=32,
-            epochs=100,
-            learning_rate=0.001
-        )
-    except FileNotFoundError as e:
-        print(f"Error: {str(e)}")
-    except RuntimeError as e:
-        print(f"Error: {str(e)}")
-    except Exception as e:
-        print(f"Unexpected error occurred: {str(e)}") 
+        batch_size=32,
+        epochs=100,
+        learning_rate=0.001
+    )

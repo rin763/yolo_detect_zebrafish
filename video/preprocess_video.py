@@ -1,10 +1,13 @@
 import cv2
 import numpy as np
 import os
+import sys
+
+sys.stdout.reconfigure(encoding='utf-8')
 
 # 入力動画パスと出力動画パス
-input_video_path = './video/training/30min/output_left.mp4'
-output_video_path = './video/processed_train_video_left.mp4'
+input_video_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\video\training\30min\output_right.mp4"
+output_video_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_right.mp4"
 
 # シャープ化カーネル
 sharpen_kernel = np.array([[0, -1, 0],
