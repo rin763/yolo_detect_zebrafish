@@ -25,8 +25,13 @@ class TrackingDataset(Dataset):
                 
                 # シーケンスとターゲットを作成
                 for i in range(len(track_data) - sequence_length):
-                    sequence = track_data[i:i+sequence_length, :4]
-                    target = track_data[i+sequence_length, :4]
+                    #note   might need to check
+                    #sequence = track_data[i:i+sequence_length, :4]
+                    #target = track_data[i+sequence_length, :4]
+
+                    sequence = track_data[i:i+sequence_length,1:5]
+                    target = track_data[i+sequence_length,1:5]
+
                     self.sequences.append(sequence)
                     self.targets.append(target)
     
@@ -61,6 +66,12 @@ def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=3
 
     ## FOR MODEL TO USE CUDA
     model = LSTMTracker().to(device)
+
+# 
+#def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=32, epochs=100, learning_rate=0.001):
+ #   """LSTMモデルをトレーニングする関数"""
+    # モデルの初期化
+  #  model = LSTMTracker()
 
     # データセットの準備
     print("Loading training data...")
@@ -148,21 +159,31 @@ def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=3
 
 if __name__ == "__main__":
     # パスの設定
-    model_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\train_results\weights\best.pt"
+    #note
+    #model_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\train_results\weights\best.pt"
         
     # Video paths
-    video_paths = [
-        r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_left.mp4",
-        r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_right.mp4"
-    ]
+    #video_paths = [
+     #   r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_left.mp4",
+     #   r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_right.mp4"
+     # ]
     #train_data_dir = "train_data"
     #val_data_dir = "val_data"
     #model_save_path = "best_lstm_model.pth"
 
     ### need to change path
-    train_data_dir=r"C:\Users\et439\OneDrive\桌面\project\Rin\data\train_data"
-    val_data_dir= r"C:\Users\et439\OneDrive\桌面\project\Rin\data\val_data"
-    model_save_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\data\models\best_lstm_model.pth"
+    # train_data_dir=r"C:\Users\et439\OneDrive\桌面\project\Rin\data\train_data"
+    # val_data_dir= r"C:\Users\et439\OneDrive\桌面\project\Rin\data\val_data"
+    # model_save_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\data\models\best_lstm_model.pth"
+
+    video_paths = [
+        "./video/processed_train_video_left.mp4",
+        "./video/processed_train_video_right.mp4"
+    ]
+    model_path = "./train_results/weights/best.pt"
+    train_data_dir = "train_data"
+    val_data_dir = "val_data"
+    model_save_path = "best_lstm_model.pth"
 
     # 教師データの収集
     collect_training_data(video_paths, train_data_dir, model_path)
@@ -176,10 +197,13 @@ if __name__ == "__main__":
         if i < val_count:
             src = os.path.join(train_data_dir, file)
             dst = os.path.join(val_data_dir, file)
-            #
+
+            #note for windows
             if os.path.exists(dst):
                 os.remove(dst)
-            os.rename(src, dst)
+
+            #note for mac 
+            # os.rename(src, dst)
     
     # LSTMモデルのトレーニング
     train_lstm_model(
@@ -191,3 +215,4 @@ if __name__ == "__main__":
         epochs=100,
         learning_rate=0.001
     )
+
