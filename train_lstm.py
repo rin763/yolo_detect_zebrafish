@@ -8,6 +8,10 @@ from torch.utils.data import Dataset, DataLoader
 import os
 from object_tracking import LSTMTracker, ObjectTracker
 
+from tqdm import tqdm
+#   import shutil
+#       if not os.path.exists(dst):
+#            shutil.move(src, dst)
 class TrackingDataset(Dataset):
     def __init__(self, data_dir, sequence_length=10):
         self.sequence_length = sequence_length
@@ -21,8 +25,13 @@ class TrackingDataset(Dataset):
                 
                 # シーケンスとターゲットを作成
                 for i in range(len(track_data) - sequence_length):
+                    #note   might need to check
+                    #sequence = track_data[i:i+sequence_length, :4]
+                    #target = track_data[i+sequence_length, :4]
+
                     sequence = track_data[i:i+sequence_length,1:5]
                     target = track_data[i+sequence_length,1:5]
+
                     self.sequences.append(sequence)
                     self.targets.append(target)
     
@@ -49,8 +58,21 @@ def collect_training_data(video_paths, output_dir, model_path):
 def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=32, epochs=100, learning_rate=0.001):
     """LSTMモデルをトレーニングする関数"""
     # モデルの初期化
-    model = LSTMTracker()
-    
+    #model = LSTMTracker()
+
+    ### for cuda use
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    ## FOR MODEL TO USE CUDA
+    model = LSTMTracker().to(device)
+
+# 
+#def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=32, epochs=100, learning_rate=0.001):
+ #   """LSTMモデルをトレーニングする関数"""
+    # モデルの初期化
+  #  model = LSTMTracker()
+
     # データセットの準備
     print("Loading training data...")
     train_dataset = TrackingDataset(train_data_dir)
@@ -81,8 +103,13 @@ def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=3
         model.train()
         train_loss = 0.0
         train_batches = 0
-        
-        for sequences, targets in train_loader:
+
+        ## tqdm for progressing bar
+        for sequences, targets in tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{epochs}"):
+            ## for cuda use
+            sequences = sequences.to(device)
+            targets = targets.to(device)
+
             optimizer.zero_grad()
             outputs = model(sequences)
             loss = criterion(outputs, targets)
@@ -101,7 +128,12 @@ def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=3
         val_batches = 0
         
         with torch.no_grad():
-            for sequences, targets in val_loader:
+            ## tqdm for progressing bar
+            for sequences, targets in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}/{epochs}"):
+                ## for cuda use
+                sequences = sequences.to(device)
+                targets = targets.to(device)
+
                 outputs = model(sequences)
                 loss = criterion(outputs, targets)
                 val_loss += loss.item()
@@ -127,6 +159,23 @@ def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=3
 
 if __name__ == "__main__":
     # パスの設定
+    #note
+    #model_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\train_results\weights\best.pt"
+        
+    # Video paths
+    #video_paths = [
+     #   r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_left.mp4",
+     #   r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_right.mp4"
+     # ]
+    #train_data_dir = "train_data"
+    #val_data_dir = "val_data"
+    #model_save_path = "best_lstm_model.pth"
+
+    ### need to change path
+    # train_data_dir=r"C:\Users\et439\OneDrive\桌面\project\Rin\data\train_data"
+    # val_data_dir= r"C:\Users\et439\OneDrive\桌面\project\Rin\data\val_data"
+    # model_save_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\data\models\best_lstm_model.pth"
+
     video_paths = [
         "./video/processed_train_video_left.mp4",
         "./video/processed_train_video_right.mp4"
@@ -135,7 +184,7 @@ if __name__ == "__main__":
     train_data_dir = "train_data"
     val_data_dir = "val_data"
     model_save_path = "best_lstm_model.pth"
-    
+
     # 教師データの収集
     collect_training_data(video_paths, train_data_dir, model_path)
     
@@ -148,14 +197,22 @@ if __name__ == "__main__":
         if i < val_count:
             src = os.path.join(train_data_dir, file)
             dst = os.path.join(val_data_dir, file)
-            os.rename(src, dst)
+
+            #note for windows
+            if os.path.exists(dst):
+                os.remove(dst)
+
+            #note for mac 
+            # os.rename(src, dst)
     
     # LSTMモデルのトレーニング
     train_lstm_model(
         train_data_dir=train_data_dir,
         val_data_dir=val_data_dir,
         model_save_path=model_save_path,
+        
         batch_size=32,
         epochs=100,
         learning_rate=0.001
-    ) 
+    )
+
