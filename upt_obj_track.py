@@ -22,7 +22,7 @@ class ObjectTracker:
         # YOLOモデルとLSTMモデルの読み込み
         self.yolo = YOLO(model_path)
         self.lstm = LSTMTracker()
-        self.lstm.load_state_dict(torch.load('./best_lstm_model.pth', map_location='cpu'))
+        self.lstm.load_state_dict(torch.load(r"C:\Users\et439\OneDrive\桌面\project\Rin\best_lstm_model.pth", map_location='cpu'))
         self.lstm.eval()
 
         self.sequence_length = sequence_length
@@ -33,6 +33,9 @@ class ObjectTracker:
 
         # 🔸ログ保持リスト
         self.tracking_log = []
+
+        self.cooling_tracks = {}  # 冷卻期中的軌跡
+        self.cooldown_frames = 60  # 冷卻期長度
 
     def get_new_id(self):
         if self.available_ids:
@@ -106,8 +109,42 @@ class ObjectTracker:
         for track_id in list(self.active_tracks.keys()):
             if track_id not in current_detections:
                 self.missed_frames[track_id] = self.missed_frames.get(track_id, 0) + 1
+###################### 修改部分 #########################
                 if self.missed_frames[track_id] > 30:
-                    self.release_id(track_id)
+                # 把這個 track_id 暫時進入冷卻期，不馬上釋放
+                    self.cooling_tracks[track_id] = {
+                        "last_bbox": self.active_tracks[track_id],
+                        "cooling_count": 0
+                    }
+                    self.active_tracks.pop(track_id, None)
+                    self.missed_frames.pop(track_id, None)
+        # --- 5. 冷卻中的 track ID 處理 ---
+        cooling_to_release = []
+
+        for track_id, info in self.cooling_tracks.items():
+            info["cooling_count"] += 1
+            # 嘗試看看目前的 detection 有沒有一個靠近 last_bbox，可以復活
+            for det in detections:
+                bbox = det.xywh[0].cpu().numpy()
+                dist = np.linalg.norm(bbox[:2] - info["last_bbox"][:2])
+                if dist < 100:  # 嘗試復活此 ID
+                    self.active_tracks[track_id] = bbox
+                    self.track_history[track_id] = deque(maxlen=self.sequence_length)
+                    self.track_history[track_id].append(self.preprocess_detection(bbox))
+                    self.missed_frames[track_id] = 0
+                    cooling_to_release.append(track_id)
+                    break
+
+            # 如果冷卻期超過上限，就真的刪掉
+            if info["cooling_count"] > self.cooldown_frames:
+                cooling_to_release.append(track_id)
+                self.release_id(track_id)
+
+        # 移除已復活或已刪除的冷卻 ID
+        for tid in cooling_to_release:
+            self.cooling_tracks.pop(tid, None)
+
+###############################################################
 
     def save_tracking_log(self, filepath):
         with open(filepath, mode='w', newline='') as f:
@@ -121,11 +158,24 @@ class ObjectTracker:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = int(cap.get(cv2.CAP_PROP_FPS))
 
-        output_path = "./video/upt_tracking_result.mp4"
-        csv_path = "./box/upt_lstm_tracking_log.csv"
+        output_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\video\upt_tracking_result.mp4"
+        csv_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\video\box\upt_lstm_tracking_log.csv"
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
+####### 把 bounding box 的邊框顏色做成不同顏色以便區分  ##########
+        # define ID color（BGR form）
+        id_colors = {
+            1: (0, 255, 0),      # green
+            2: (255, 0, 0),      # blue
+            3: (0, 255, 255),    # yellow
+            4: (255, 0, 255),    # purple
+            5: (0, 128, 255),    # orange
+        }
+        default_color = (0, 0, 255)  # red, use for "when ID > 5"
+
+
+###############################################################
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -155,9 +205,10 @@ class ObjectTracker:
 
                     if closest_id is not None:
                         used_ids.add(closest_id)
-                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                        color = id_colors.get(closest_id, default_color)
+                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
                         cv2.putText(frame, f"ID: {closest_id}", (int(x1), int(y1) - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
 
             if results[0].boxes is None or len(results[0].boxes) == 0:
                 for track_id, bbox in self.active_tracks.items():
@@ -185,7 +236,8 @@ class ObjectTracker:
         print(f"Tracking log saved to: {csv_path}")
 
 if __name__ == "__main__":
-    model_path = "./train_results/weights/best.pt"
+    model_path =r"C:\Users\et439\OneDrive\桌面\project\Rin\train_results\weights\best.pt"
+
     tracker = ObjectTracker(model_path)
-    video_path = "./video/processed_video.mp4"
+    video_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_video.mp4"
     tracker.process_video(video_path)

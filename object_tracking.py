@@ -321,7 +321,8 @@ class ObjectTracker:
 
 if __name__ == "__main__":
     # モデルのパスを指定
-    model_path = "./train_results/weights/best.pt"
+    model_path = r'C:\Users\et439\OneDrive\桌面\project\Rin\train_results\weights\best.pt'
+
     lstm_model_path = "best_lstm_model.pth"  # 学習済みLSTMモデルのパス
     
     # トラッカーの初期化
@@ -331,4 +332,4 @@ if __name__ == "__main__":
     video_path = "./video/processed_video.mp4"
     
     # 動画の処理開始
-    tracker.process_video(video_path) 
+    tracker.process_video(video_path)
