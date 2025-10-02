@@ -209,7 +209,7 @@ class ObjectTracker:
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         
         # 出力用のVideoWriterを設定
-        output_path = "video/yolo_tracking_result.mp4"
+        output_path = "video/tracking_video_right.mp4"
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
@@ -328,7 +328,7 @@ if __name__ == "__main__":
     tracker = ObjectTracker(model_path, lstm_model_path)
     
     # 動画のパスを指定
-    video_path = "./video/processed_video.mp4"
+    video_path = "./video/processed_train_video_right.mp4"
     
     # 動画の処理開始
     tracker.process_video(video_path) 
