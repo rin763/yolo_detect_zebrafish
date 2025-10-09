@@ -18,9 +18,12 @@ class LSTMTracker(nn.Module):
         return predictions
 
 class DualObjectTracker:
-    def __init__(self, model_path, lstm_model_path=None, sequence_length=10):
-        # YOLOモデルの読み込み
-        self.yolo = YOLO(model_path)
+    def __init__(self, model_path, lstm_model_path=None, sequence_length=10, max_fish=20):
+        # YOLOモデルの読み込み（model_pathがNoneの場合はスキップ）
+        if model_path is not None:
+            self.yolo = YOLO(model_path)
+        else:
+            self.yolo = None
         
         # LSTMモデルの初期化
         self.lstm = LSTMTracker()
@@ -28,36 +31,107 @@ class DualObjectTracker:
             self.lstm.load_state_dict(torch.load(lstm_model_path))
             print(f"Loaded LSTM model from {lstm_model_path}")
         self.sequence_length = sequence_length
+        self.max_fish = max_fish
         
         # 左と右の動画の追跡履歴を保存
         self.left_track_history = {}
         self.right_track_history = {}
         
-        # ID管理システム（左から順番にIDを振る）
+        # 改善されたID管理システム
         self.next_id = 1
         self.left_active_tracks = {}
         self.right_active_tracks = {}
         self.left_missed_frames = {}
         self.right_missed_frames = {}
         
+        # 見失った魚の情報を記憶するシステム（左右それぞれ）
+        self.left_lost_fish = {}
+        self.right_lost_fish = {}
+        self.reuse_distance_threshold = 150
+        self.max_lost_frames = 60
+        
+        # 破棄されたIDを記録するシステム（左右共通）
+        self.discarded_ids = set()  # 破棄されたIDのセット
+        self.max_discarded_ids = 50  # 記録する最大破棄ID数
+        
     def get_new_id(self):
-        """新しいIDを取得"""
+        """新しいIDを取得（破棄されたIDを優先的に再利用）"""
+        # 破棄されたIDがあれば再利用
+        if self.discarded_ids:
+            reused_id = min(self.discarded_ids)  # 最小のIDを再利用
+            self.discarded_ids.remove(reused_id)
+            print(f"Reusing discarded ID: {reused_id}")
+            return reused_id
+        
+        # 破棄されたIDがない場合は新しいIDを作成
         new_id = self.next_id
         self.next_id += 1
         return new_id
     
-    def release_id(self, obj_id, is_left=True):
-        """IDを解放"""
+    def release_id(self, obj_id, current_frame, is_left=True):
+        """IDを解放し、見失った魚として記録"""
         if is_left:
             if obj_id in self.left_active_tracks:
+                # 見失った魚の情報を保存
+                self.left_lost_fish[obj_id] = {
+                    'last_position': self.left_active_tracks[obj_id].copy(),
+                    'lost_frames': 0,
+                    'last_seen_frame': current_frame
+                }
                 del self.left_active_tracks[obj_id]
             if obj_id in self.left_missed_frames:
                 del self.left_missed_frames[obj_id]
+            if obj_id in self.left_track_history:
+                del self.left_track_history[obj_id]
         else:
             if obj_id in self.right_active_tracks:
+                # 見失った魚の情報を保存
+                self.right_lost_fish[obj_id] = {
+                    'last_position': self.right_active_tracks[obj_id].copy(),
+                    'lost_frames': 0,
+                    'last_seen_frame': current_frame
+                }
                 del self.right_active_tracks[obj_id]
             if obj_id in self.right_missed_frames:
                 del self.right_missed_frames[obj_id]
+            if obj_id in self.right_track_history:
+                del self.right_track_history[obj_id]
+    
+    def find_reusable_id(self, new_position, current_frame, is_left=True):
+        """見失った魚の中で再利用可能なIDを探す"""
+        lost_fish = self.left_lost_fish if is_left else self.right_lost_fish
+        reusable_id = None
+        min_distance = float('inf')
+        
+        for fish_id, fish_info in list(lost_fish.items()):
+            # フレーム数が上限を超えている場合は破棄されたIDとして記録
+            if fish_info['lost_frames'] > self.max_lost_frames:
+                del lost_fish[fish_id]
+                self.add_discarded_id(fish_id)
+                continue
+                
+            # 距離を計算
+            last_pos = fish_info['last_position']
+            distance = np.linalg.norm(np.array(new_position[:2]) - np.array(last_pos[:2]))
+            
+            # 距離が閾値以下で、最も近い場合
+            if distance <= self.reuse_distance_threshold and distance < min_distance:
+                min_distance = distance
+                reusable_id = fish_id
+        
+        return reusable_id
+    
+    def add_discarded_id(self, fish_id):
+        """破棄されたIDを記録"""
+        if len(self.discarded_ids) < self.max_discarded_ids:
+            self.discarded_ids.add(fish_id)
+            print(f"Added discarded ID {fish_id} to reuse pool (total: {len(self.discarded_ids)})")
+        else:
+            # 最大数に達している場合は、最も古いIDを削除して新しいIDを追加
+            oldest_id = max(self.discarded_ids)
+            self.discarded_ids.remove(oldest_id)
+            self.discarded_ids.add(fish_id)
+            print(f"Replaced discarded ID {oldest_id} with {fish_id}")
     
     def preprocess_detection(self, detection):
         # YOLOの検出結果をLSTMの入力形式に変換
@@ -65,6 +139,11 @@ class DualObjectTracker:
         return np.array([x, y, w, h])
     
     def update_tracking(self, frame_id, detections, is_left=True):
+        # 見失った魚のフレーム数を更新
+        lost_fish = self.left_lost_fish if is_left else self.right_lost_fish
+        for fish_id in lost_fish:
+            lost_fish[fish_id]['lost_frames'] += 1
+        
         # 現在のフレームで検出された物体のIDを記録
         current_detections = set()
         active_tracks = self.left_active_tracks if is_left else self.right_active_tracks
@@ -77,37 +156,66 @@ class DualObjectTracker:
             
             # 既存の追跡とマッチング
             matched = False
+            min_distance = float('inf')
+            best_match_id = None
+            
             for track_id, track_info in list(active_tracks.items()):
                 if track_id in current_detections:
                     continue
                     
                 # 既存の追跡と新しい検出の距離を計算
-                old_bbox = track_history[track_id][-1]
-                distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
-                
-                # 距離が閾値以下の場合、同じ物体とみなす
-                if distance < 200:
-                    current_detections.add(track_id)
-                    matched = True
-                    missed_frames[track_id] = 0
-                    track_history[track_id].append(self.preprocess_detection(bbox))
-                    break
+                if track_id in track_history and len(track_history[track_id]) > 0:
+                    old_bbox = track_history[track_id][-1]
+                    distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
+                    
+                    # 距離が閾値以下の場合、候補として記録
+                    if distance < 200:
+                        if distance < min_distance:
+                            min_distance = distance
+                            best_match_id = track_id
             
-            # 新しい物体の場合
+            # 最適なマッチを見つけた場合
+            if best_match_id is not None:
+                current_detections.add(best_match_id)
+                matched = True
+                missed_frames[best_match_id] = 0
+                track_history[best_match_id].append(self.preprocess_detection(bbox))
+                active_tracks[best_match_id] = bbox
+            
+            # 既存の追跡にマッチしなかった場合、見失った魚のIDを再利用
             if not matched:
-                new_id = self.get_new_id()
-                current_detections.add(new_id)
-                active_tracks[new_id] = bbox
-                track_history[new_id] = deque(maxlen=self.sequence_length)
-                track_history[new_id].append(self.preprocess_detection(bbox))
-                missed_frames[new_id] = 0
+                reusable_id = self.find_reusable_id(bbox, frame_id, is_left)
+                if reusable_id is not None:
+                    # 見失った魚のIDを再利用
+                    current_detections.add(reusable_id)
+                    active_tracks[reusable_id] = bbox
+                    track_history[reusable_id] = deque(maxlen=self.sequence_length)
+                    track_history[reusable_id].append(self.preprocess_detection(bbox))
+                    missed_frames[reusable_id] = 0
+                    # 見失った魚リストから削除
+                    del lost_fish[reusable_id]
+                    side = "left" if is_left else "right"
+                    print(f"Reused ID {reusable_id} for fish near position {bbox[:2]} ({side})")
+                else:
+                    # 新しいIDを作成
+                    new_id = self.get_new_id()
+                    current_detections.add(new_id)
+                    active_tracks[new_id] = bbox
+                    track_history[new_id] = deque(maxlen=self.sequence_length)
+                    track_history[new_id].append(self.preprocess_detection(bbox))
+                    missed_frames[new_id] = 0
+                    side = "left" if is_left else "right"
+                    print(f"Created new ID {new_id} for fish at position {bbox[:2]} ({side})")
         
         # 見失った物体の処理
         for track_id in list(active_tracks.keys()):
             if track_id not in current_detections:
                 missed_frames[track_id] = missed_frames.get(track_id, 0) + 1
                 if missed_frames[track_id] > 30:  # 30フレーム以上見失った場合
-                    self.release_id(track_id, is_left)
+                    missed_count = missed_frames[track_id]
+                    self.release_id(track_id, frame_id, is_left)
+                    side = "left" if is_left else "right"
+                    print(f"Lost fish ID {track_id} after {missed_count} frames ({side})")
 
     def process_dual_videos(self, left_video_path, right_video_path):
         # 左と右の動画を同時に処理
