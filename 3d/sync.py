@@ -1,10 +1,10 @@
 # sync_estimate.py
 import cv2 as cv, numpy as np
 
-LEFT="video/new_output_left.MP4"; RIGHT="video/new_output_right.MP4"
-SAMPLE=1200  # 使うフレーム数
-STEP=10     # 何フレームおきに評価するか
-MAX_LAG=10  # 探索する遅延の最大フレーム数（±MAX_LAG）
+LEFT="../video/new_output_left.MP4"; RIGHT="../video/new_output_right.MP4"
+SAMPLE=1200  
+STEP=10     
+MAX_LAG=10  
 
 def frame_diffs(path, sample, step):
     cap=cv.VideoCapture(path); n=int(cap.get(cv.CAP_PROP_FRAME_COUNT))
@@ -25,7 +25,7 @@ def frame_diffs(path, sample, step):
 
 a=frame_diffs(LEFT, SAMPLE, STEP)
 b=frame_diffs(RIGHT,SAMPLE, STEP)
-# 相互相関
+
 lags=range(-MAX_LAG, MAX_LAG+1)
 best_lag=0; best_corr=-1e9
 for lag in lags:
