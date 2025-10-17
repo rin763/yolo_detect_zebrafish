@@ -125,11 +125,20 @@ class ObjectTracker:
         else:
             self.yolo = None
         
-        # LSTMモデルの初期化
+        # LSTMモデルの初期化（表示用のみ）
         self.lstm = LSTMTracker()
+        self.lstm_available = False
         if lstm_model_path and os.path.exists(lstm_model_path):
-            self.lstm.load_state_dict(torch.load(lstm_model_path))
-            print(f"Loaded LSTM model from {lstm_model_path}")
+            try:
+                self.lstm.load_state_dict(torch.load(lstm_model_path))
+                self.lstm.eval()  # 推論モードに設定
+                self.lstm_available = True
+                print(f"Loaded LSTM model from {lstm_model_path} (display only)")
+            except Exception as e:
+                print(f"Failed to load LSTM model: {e}")
+                self.lstm_available = False
+        else:
+            print(f"LSTM model not found at {lstm_model_path}")
         self.sequence_length = sequence_length
         self.max_fish = max_fish
         
@@ -148,7 +157,27 @@ class ObjectTracker:
         
         # 破棄されたIDを記録するシステム
         self.discarded_ids = set()  # 破棄されたIDのセット
-        self.max_discarded_ids = 50  # 記録する最大破棄ID数
+        self.max_discarded_ids = 20  # 記録する最大破棄ID数
+        
+    def predict_next_position(self, track_id):
+        """指定されたトラックIDの次の位置をLSTMで予測（表示用のみ）"""
+        if not self.lstm_available or track_id not in self.track_history:
+            return None
+            
+        if len(self.track_history[track_id]) < self.sequence_length:
+            return None
+        
+        # 履歴からシーケンスを取得
+        history = list(self.track_history[track_id])
+        sequence = np.array(history[-self.sequence_length:])
+        
+        # LSTMに入力する形式に変換
+        sequence_tensor = torch.FloatTensor(sequence).unsqueeze(0)  # (1, sequence_length, 4)
+        
+        with torch.no_grad():
+            prediction = self.lstm(sequence_tensor).cpu().numpy()[0]  # [x, y, w, h]
+        
+        return prediction
         
     def get_new_id(self):
         """新しいIDを取得（破棄されたIDを優先的に再利用）"""
@@ -165,7 +194,7 @@ class ObjectTracker:
         return new_id
     
     def release_id(self, obj_id, current_frame):
-        """IDを解放し、見失った魚として記録"""
+        """IDを解放し、見失った魚として記録（30フレーム以上見失った場合）"""
         if obj_id in self.active_tracks:
             # 見失った魚の情報を保存
             self.lost_fish[obj_id] = {
@@ -180,7 +209,7 @@ class ObjectTracker:
             del self.track_history[obj_id]
     
     def find_reusable_id(self, new_position, current_frame):
-        """見失った魚の中で再利用可能なIDを探す"""
+        """見失った魚の中で再利用可能なIDを探す（30フレーム以上）"""
         reusable_id = None
         min_distance = float('inf')
         
@@ -203,7 +232,7 @@ class ObjectTracker:
         return reusable_id
     
     def add_discarded_id(self, fish_id):
-        """破棄されたIDを記録"""
+        """破棄されたIDを記録（20個まで）"""
         if len(self.discarded_ids) < self.max_discarded_ids:
             self.discarded_ids.add(fish_id)
             print(f"Added discarded ID {fish_id} to reuse pool (total: {len(self.discarded_ids)})")
@@ -220,7 +249,7 @@ class ObjectTracker:
         return np.array([x, y, w, h])
     
     def update_tracking(self, frame_id, detections):
-        # 見失った魚のフレーム数を更新
+        # 見失った魚のフレーム数を更新（30フレーム以上見失った場合）
         for fish_id in self.lost_fish:
             self.lost_fish[fish_id]['lost_frames'] += 1
         
@@ -231,7 +260,7 @@ class ObjectTracker:
             # 物体の位置情報を取得
             bbox = det.xywh[0].cpu().numpy()  # x, y, w, h
             
-            # 既存の追跡とマッチング
+            # 既存の追跡とマッチング（200ピクセル以内）
             matched = False
             min_distance = float('inf')
             best_match_id = None
@@ -240,18 +269,18 @@ class ObjectTracker:
                 if track_id in current_detections:
                     continue
                     
-                # 既存の追跡と新しい検出の距離を計算
+                # 既存の追跡と新しい検出の距離を計算（200ピクセル以内）
                 if track_id in self.track_history and len(self.track_history[track_id]) > 0:
                     old_bbox = self.track_history[track_id][-1]
                     distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
                     
-                    # 距離が閾値以下の場合、候補として記録
+                    # 距離が閾値以下の場合、候補として記録（200ピクセル以内）
                     if distance < 200:
                         if distance < min_distance:
                             min_distance = distance
                             best_match_id = track_id
             
-            # 最適なマッチを見つけた場合
+            # 最適なマッチを見つけた場合（200ピクセル以内）
             if best_match_id is not None:
                 current_detections.add(best_match_id)
                 matched = True
@@ -259,11 +288,11 @@ class ObjectTracker:
                 self.track_history[best_match_id].append(self.preprocess_detection(bbox))
                 self.active_tracks[best_match_id] = bbox
             
-            # 既存の追跡にマッチしなかった場合、見失った魚のIDを再利用
+            # 既存の追跡にマッチしなかった場合、見失った魚のIDを再利用（200ピクセル以内）
             if not matched:
                 reusable_id = self.find_reusable_id(bbox, frame_id)
                 if reusable_id is not None:
-                    # 見失った魚のIDを再利用
+                    # 見失った魚のIDを再利用（200ピクセル以内）
                     current_detections.add(reusable_id)
                     self.active_tracks[reusable_id] = bbox
                     self.track_history[reusable_id] = deque(maxlen=self.sequence_length)
@@ -273,7 +302,7 @@ class ObjectTracker:
                     del self.lost_fish[reusable_id]
                     print(f"Reused ID {reusable_id} for fish near position {bbox[:2]}")
                 else:
-                    # 新しいIDを作成
+                    # 新しいIDを作成（破棄されたIDを優先的に再利用）
                     new_id = self.get_new_id()
                     current_detections.add(new_id)
                     self.active_tracks[new_id] = bbox
@@ -282,7 +311,7 @@ class ObjectTracker:
                     self.missed_frames[new_id] = 0
                     print(f"Created new ID {new_id} for fish at position {bbox[:2]}")
         
-        # 見失った物体の処理
+        # 見失った物体の処理（30フレーム以上見失った場合） 
         for track_id in list(self.active_tracks.keys()):
             if track_id not in current_detections:
                 self.missed_frames[track_id] = self.missed_frames.get(track_id, 0) + 1
@@ -343,6 +372,19 @@ class ObjectTracker:
                         cv2.putText(frame, f"ID: {closest_id}", 
                                   (int(x1), int(y1)-10), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+            
+            # 全アクティブトラックのLSTM予測位置を赤色で表示（表示のみ）
+            if self.lstm_available:
+                for track_id in self.active_tracks.keys():
+                    if track_id in self.track_history and len(self.track_history[track_id]) >= self.sequence_length:
+                        prediction = self.predict_next_position(track_id)
+                        if prediction is not None:
+                            pred_x, pred_y = prediction[:2]
+                            # 赤色で予測位置を表示
+                            cv2.circle(frame, (int(pred_x), int(pred_y)), 8, (0, 0, 255), 2)  # 赤色の円
+                            cv2.putText(frame, f"LSTM-{track_id}", 
+                                      (int(pred_x)+15, int(pred_y)), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)  # 赤色のテキスト
             
             # フレームを出力ファイルに書き込み
             out.write(frame)

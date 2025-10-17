@@ -158,23 +158,6 @@ def train_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=3
     print(f"Best validation loss: {best_val_loss:.4f}")
 
 if __name__ == "__main__":
-    # パスの設定
-    #note
-    #model_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\train_results\weights\best.pt"
-        
-    # Video paths
-    #video_paths = [
-     #   r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_left.mp4",
-     #   r"C:\Users\et439\OneDrive\桌面\project\Rin\video\processed_train_video_right.mp4"
-     # ]
-    #train_data_dir = "train_data"
-    #val_data_dir = "val_data"
-    #model_save_path = "best_lstm_model.pth"
-
-    ### need to change path
-    # train_data_dir=r"C:\Users\et439\OneDrive\桌面\project\Rin\data\train_data"
-    # val_data_dir= r"C:\Users\et439\OneDrive\桌面\project\Rin\data\val_data"
-    # model_save_path = r"C:\Users\et439\OneDrive\桌面\project\Rin\data\models\best_lstm_model.pth"
 
     video_paths = [
         "./video/processed_train_video_left.mp4",
