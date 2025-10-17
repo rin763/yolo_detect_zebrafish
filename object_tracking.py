@@ -159,6 +159,11 @@ class ObjectTracker:
         self.discarded_ids = set()  # 破棄されたIDのセット
         self.max_discarded_ids = 20  # 記録する最大破棄ID数
         
+        # LSTM予測ベース検出の設定
+        self.use_lstm_detection = True  # LSTM予測を検出として使用するか
+        self.lstm_detection_threshold = 0.7  # LSTM予測の信頼度閾値
+        self.max_lstm_detection_frames = 15  # LSTM予測検出の最大フレーム数
+        
     def predict_next_position(self, track_id):
         """指定されたトラックIDの次の位置をLSTMで予測（表示用のみ）"""
         if not self.lstm_available or track_id not in self.track_history:
@@ -178,6 +183,71 @@ class ObjectTracker:
             prediction = self.lstm(sequence_tensor).cpu().numpy()[0]  # [x, y, w, h]
         
         return prediction
+    
+    def compute_prediction_confidence(self, track_id):
+        """LSTM予測の信頼度を計算"""
+        if track_id not in self.track_history or len(self.track_history[track_id]) < 3:
+            return 0.0
+        
+        # 最近3フレームの移動パターンを分析
+        recent_positions = list(self.track_history[track_id])[-3:]
+        
+        # 移動の一貫性を計算
+        movements = []
+        for i in range(1, len(recent_positions)):
+            movement = np.linalg.norm(np.array(recent_positions[i][:2]) - np.array(recent_positions[i-1][:2]))
+            movements.append(movement)
+        
+        if len(movements) < 2:
+            return 0.0
+        
+        # 移動の一貫性（標準偏差が小さいほど信頼度が高い）
+        movement_std = np.std(movements)
+        avg_movement = np.mean(movements)
+        
+        # 信頼度計算（移動が一貫しているほど高い）
+        if avg_movement == 0:
+            return 1.0
+        
+        consistency = max(0, 1 - (movement_std / avg_movement))
+        return min(1.0, consistency)
+    
+    def create_virtual_detection(self, track_id, prediction):
+        """LSTM予測から仮想検出オブジェクトを作成"""
+        # 仮想検出オブジェクトのクラス
+        class VirtualDetection:
+            def __init__(self, bbox):
+                self.xywh = [torch.tensor(bbox)]  # YOLO検出と同じ形式
+                self.conf = 0.8  # 仮想検出の信頼度
+                self.cls = torch.tensor([0])  # クラス（魚）
+        
+        return VirtualDetection(prediction)
+    
+    def get_lstm_detections(self):
+        """LSTM予測から仮想検出を生成"""
+        virtual_detections = []
+        
+        if not self.lstm_available or not self.use_lstm_detection:
+            return virtual_detections
+        
+        for track_id in self.active_tracks.keys():
+            # 見失い中のトラックのみ対象
+            if self.missed_frames.get(track_id, 0) > 0:
+                # LSTM予測が可能かチェック
+                if track_id in self.track_history and len(self.track_history[track_id]) >= self.sequence_length:
+                    prediction = self.predict_next_position(track_id)
+                    if prediction is not None:
+                        # 予測の信頼度を計算
+                        confidence = self.compute_prediction_confidence(track_id)
+                        
+                        # 信頼度が閾値以上で、見失いフレーム数が上限以下
+                        if confidence >= self.lstm_detection_threshold and self.missed_frames[track_id] <= self.max_lstm_detection_frames:
+                            virtual_detection = self.create_virtual_detection(track_id, prediction)
+                            virtual_detection.track_id = track_id  # トラックIDを追加
+                            virtual_detections.append(virtual_detection)
+                            print(f"Created virtual detection for track {track_id} (confidence: {confidence:.3f}, missed: {self.missed_frames[track_id]})")
+        
+        return virtual_detections
         
     def get_new_id(self):
         """新しいIDを取得（破棄されたIDを優先的に再利用）"""
@@ -341,50 +411,74 @@ class ObjectTracker:
             # YOLOで物体検出
             results = self.yolo.track(frame, persist=True)
             
+            # YOLO検出とLSTM仮想検出を結合
+            all_detections = []
             if results[0].boxes is not None:
-                # 追跡の更新
-                self.update_tracking(cap.get(cv2.CAP_PROP_POS_FRAMES), 
-                                   results[0].boxes)
+                all_detections.extend(results[0].boxes)
+            
+            # LSTM予測から仮想検出を生成
+            virtual_detections = self.get_lstm_detections()
+            all_detections.extend(virtual_detections)
+            
+            if all_detections:
+                # 追跡の更新（YOLO検出 + LSTM仮想検出）
+                self.update_tracking(cap.get(cv2.CAP_PROP_POS_FRAMES), all_detections)
                 
                 # 結果の可視化
                 used_ids = set()  # このフレームで使用済みのIDを記録
-                for box in results[0].boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    # 物体の中心座標を計算
-                    center_x = (x1 + x2) / 2
-                    center_y = (y1 + y2) / 2
+                for box in all_detections:
+                    # YOLO検出とLSTM仮想検出を区別
+                    is_virtual = hasattr(box, 'track_id')
                     
-                    # 最も近い追跡IDを探す（使用済みのIDは除外）
-                    min_distance = float('inf')
-                    closest_id = None
-                    
-                    for track_id, track_info in self.active_tracks.items():
-                        if track_id in used_ids:  # 使用済みのIDはスキップ
-                            continue
-                        distance = np.linalg.norm(np.array([center_x, center_y]) - track_info[:2])
-                        if distance < min_distance:
-                            min_distance = distance
-                            closest_id = track_id
-                    
-                    if closest_id is not None:
-                        used_ids.add(closest_id)  # 使用したIDを記録
-                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                        cv2.putText(frame, f"ID: {closest_id}", 
-                                  (int(x1), int(y1)-10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                    if is_virtual:
+                        # LSTM仮想検出の可視化
+                        bbox = box.xywh[0].cpu().numpy()
+                        x, y, w, h = bbox
+                        x1, y1 = int(x - w/2), int(y - h/2)
+                        x2, y2 = int(x + w/2), int(y + h/2)
+                        
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)  # 黄色で仮想検出
+                        cv2.putText(frame, f"LSTM-{box.track_id}", 
+                                  (x1, y1-10), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+                    else:
+                        # YOLO検出の可視化
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        # 物体の中心座標を計算
+                        center_x = (x1 + x2) / 2
+                        center_y = (y1 + y2) / 2
+                        
+                        # 最も近い追跡IDを探す（使用済みのIDは除外）
+                        min_distance = float('inf')
+                        closest_id = None
+                        
+                        for track_id, track_info in self.active_tracks.items():
+                            if track_id in used_ids:  # 使用済みのIDはスキップ
+                                continue
+                            distance = np.linalg.norm(np.array([center_x, center_y]) - track_info[:2])
+                            if distance < min_distance:
+                                min_distance = distance
+                                closest_id = track_id
+                        
+                        if closest_id is not None:
+                            used_ids.add(closest_id)  # 使用したIDを記録
+                            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                            cv2.putText(frame, f"ID: {closest_id}", 
+                                      (int(x1), int(y1)-10), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             
             # 全アクティブトラックのLSTM予測位置を赤色で表示（表示のみ）
-            if self.lstm_available:
-                for track_id in self.active_tracks.keys():
-                    if track_id in self.track_history and len(self.track_history[track_id]) >= self.sequence_length:
-                        prediction = self.predict_next_position(track_id)
-                        if prediction is not None:
-                            pred_x, pred_y = prediction[:2]
-                            # 赤色で予測位置を表示
-                            cv2.circle(frame, (int(pred_x), int(pred_y)), 8, (0, 0, 255), 2)  # 赤色の円
-                            cv2.putText(frame, f"LSTM-{track_id}", 
-                                      (int(pred_x)+15, int(pred_y)), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)  # 赤色のテキスト
+            # if self.lstm_available:
+            #     for track_id in self.active_tracks.keys():
+            #         if track_id in self.track_history and len(self.track_history[track_id]) >= self.sequence_length:
+            #             prediction = self.predict_next_position(track_id)
+            #             if prediction is not None:
+            #                 pred_x, pred_y = prediction[:2]
+            #                 # 赤色で予測位置を表示
+            #                 cv2.circle(frame, (int(pred_x), int(pred_y)), 8, (0, 0, 255), 2)  # 赤色の円
+            #                 cv2.putText(frame, f"LSTM-{track_id}", 
+            #                           (int(pred_x)+15, int(pred_y)), 
+            #                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)  # 赤色のテキスト
             
             # フレームを出力ファイルに書き込み
             out.write(frame)
