@@ -145,6 +145,9 @@ class ObjectTracker:
         # 物体の追跡履歴を保存
         self.track_history = {}
         
+        # IDごとの位置履歴を保存（x, y座標、動きの方向）
+        self.position_history = {}  # {track_id: [(frame_id, x, y, source, direction_rad), ...]}
+        
         # 改善されたID管理システム
         self.next_id = 1  # 次の新しいID
         self.active_tracks = {}  # 現在追跡中の物体とそのID
@@ -248,6 +251,59 @@ class ObjectTracker:
                             print(f"Created virtual detection for track {track_id} (confidence: {confidence:.3f}, missed: {self.missed_frames[track_id]})")
         
         return virtual_detections
+    
+    def update_position_history(self, track_id, frame_id, x, y, source="detection"):
+        """IDごとの位置履歴を更新（動きの方向も計算）"""
+        if track_id not in self.position_history:
+            self.position_history[track_id] = []
+        
+        # 動きの方向を計算
+        direction_rad = 0.0  # デフォルト値
+        if len(self.position_history[track_id]) > 0:
+            # 前の位置を取得
+            prev_frame, prev_x, prev_y, prev_source, prev_direction = self.position_history[track_id][-1]
+            
+            # xとyの差を計算
+            dx = x - prev_x
+            dy = y - prev_y
+            
+            # 動きがある場合のみ方向を計算
+            if dx != 0 or dy != 0:
+                direction_rad = np.arctan2(dy, dx)
+                print(f"Track {track_id}: dx={dx:.2f}, dy={dy:.2f}, direction={direction_rad:.3f} rad")
+        
+        # 位置履歴に追加（方向も含む）
+        self.position_history[track_id].append((frame_id, x, y, source, direction_rad))
+        
+        # 履歴が長すぎる場合は古いものを削除（メモリ節約）
+        if len(self.position_history[track_id]) > 1000:  # 最大1000フレーム分保持
+            self.position_history[track_id] = self.position_history[track_id][-500:]  # 最新500フレーム分のみ保持
+    
+    def get_lstm_prediction_for_missed_track(self, track_id, frame_id):
+        """見失ったトラックのLSTM予測を取得（信頼度0.7以上のみ）"""
+        if not self.lstm_available or track_id not in self.track_history:
+            return None
+            
+        if len(self.track_history[track_id]) < self.sequence_length:
+            return None
+        
+        # LSTM予測を取得
+        prediction = self.predict_next_position(track_id)
+        if prediction is None:
+            return None
+        
+        # 信頼度を計算
+        confidence = self.compute_prediction_confidence(track_id)
+        
+        # 信頼度が0.7以上の場合のみ採用
+        if confidence >= 0.7:
+            pred_x, pred_y = prediction[:2]
+            # 位置履歴に追加（動きの方向も計算される）
+            self.update_position_history(track_id, frame_id, pred_x, pred_y, "lstm_prediction")
+            print(f"Added LSTM prediction to position history for track {track_id} (confidence: {confidence:.3f})")
+            return (pred_x, pred_y)
+        
+        return None
         
     def get_new_id(self):
         """新しいIDを取得（破棄されたIDを優先的に再利用）"""
@@ -277,6 +333,9 @@ class ObjectTracker:
             del self.missed_frames[obj_id]
         if obj_id in self.track_history:
             del self.track_history[obj_id]
+        # 位置履歴は保持（分析用）
+        # if obj_id in self.position_history:
+        #     del self.position_history[obj_id]
     
     def find_reusable_id(self, new_position, current_frame):
         """見失った魚の中で再利用可能なIDを探す（30フレーム以上）"""
@@ -357,6 +416,8 @@ class ObjectTracker:
                 self.missed_frames[best_match_id] = 0
                 self.track_history[best_match_id].append(self.preprocess_detection(bbox))
                 self.active_tracks[best_match_id] = bbox
+                # 位置履歴に追加（動きの方向も計算される）
+                self.update_position_history(best_match_id, frame_id, bbox[0], bbox[1], "detection")
             
             # 既存の追跡にマッチしなかった場合、見失った魚のIDを再利用（200ピクセル以内）
             if not matched:
@@ -370,6 +431,8 @@ class ObjectTracker:
                     self.missed_frames[reusable_id] = 0
                     # 見失った魚リストから削除
                     del self.lost_fish[reusable_id]
+                    # 位置履歴に追加（動きの方向も計算される）
+                    self.update_position_history(reusable_id, frame_id, bbox[0], bbox[1], "detection")
                     print(f"Reused ID {reusable_id} for fish near position {bbox[:2]}")
                 else:
                     # 新しいIDを作成（破棄されたIDを優先的に再利用）
@@ -379,12 +442,18 @@ class ObjectTracker:
                     self.track_history[new_id] = deque(maxlen=self.sequence_length)
                     self.track_history[new_id].append(self.preprocess_detection(bbox))
                     self.missed_frames[new_id] = 0
+                    # 位置履歴に追加（動きの方向も計算される）
+                    self.update_position_history(new_id, frame_id, bbox[0], bbox[1], "detection")
                     print(f"Created new ID {new_id} for fish at position {bbox[:2]}")
         
         # 見失った物体の処理（30フレーム以上見失った場合） 
         for track_id in list(self.active_tracks.keys()):
             if track_id not in current_detections:
                 self.missed_frames[track_id] = self.missed_frames.get(track_id, 0) + 1
+                
+                # 見失い中にLSTM予測で位置履歴を更新（信頼度0.7以上のみ）
+                lstm_prediction = self.get_lstm_prediction_for_missed_track(track_id, frame_id)
+                
                 if self.missed_frames[track_id] > 30:  # 30フレーム以上見失った場合
                     missed_count = self.missed_frames[track_id]
                     self.release_id(track_id, frame_id)
