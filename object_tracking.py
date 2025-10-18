@@ -167,6 +167,12 @@ class ObjectTracker:
         self.lstm_detection_threshold = 0.7  # LSTM予測の信頼度閾値
         self.max_lstm_detection_frames = 15  # LSTM予測検出の最大フレーム数
         
+        # 動きの方向ベースマッチングの設定
+        self.use_direction_matching = True  # 動きの方向を考慮したマッチングを使用するか
+        self.direction_weight = 0.3  # 方向の重み（0.0-1.0）
+        self.distance_weight = 0.7  # 距離の重み（0.0-1.0）
+        self.direction_threshold = 1.0  # 方向差の閾値（ラジアン）
+        
     def predict_next_position(self, track_id):
         """指定されたトラックIDの次の位置をLSTMで予測（表示用のみ）"""
         if not self.lstm_available or track_id not in self.track_history:
@@ -319,6 +325,81 @@ class ObjectTracker:
         self.next_id += 1
         return new_id
     
+    def get_last_direction(self, track_id):
+        """指定されたトラックの最後の動きの方向を取得"""
+        if track_id not in self.position_history or len(self.position_history[track_id]) < 2:
+            return None
+        
+        # 最後の2つの位置から方向を計算
+        last_positions = self.position_history[track_id][-2:]
+        prev_frame, prev_x, prev_y, prev_source, prev_direction = last_positions[0]
+        curr_frame, curr_x, curr_y, curr_source, curr_direction = last_positions[1]
+        
+        # 実際の移動から方向を再計算（より正確）
+        dx = curr_x - prev_x
+        dy = curr_y - prev_y
+        
+        if dx == 0 and dy == 0:
+            return 0.0
+        
+        return np.arctan2(dy, dx)
+    
+    def compute_direction_difference(self, dir1, dir2):
+        """2つの方向の差を計算（-πからπの範囲で正規化）"""
+        if dir1 is None or dir2 is None:
+            return float('inf')
+        
+        diff = dir1 - dir2
+        
+        # -πからπの範囲に正規化
+        while diff > np.pi:
+            diff -= 2 * np.pi
+        while diff < -np.pi:
+            diff += 2 * np.pi
+        
+        return abs(diff)
+    
+    def compute_enhanced_matching_cost(self, detection, track_id):
+        """距離と方向を考慮したマッチングコストを計算"""
+        if track_id not in self.track_history or len(self.track_history[track_id]) == 0:
+            return float('inf')
+        
+        # 距離コスト
+        old_bbox = self.track_history[track_id][-1]
+        distance = np.linalg.norm(detection[:2] - old_bbox[:2])
+        
+        # 距離が閾値を超える場合は除外
+        if distance > 200:
+            return float('inf')
+        
+        # 方向コスト
+        direction_cost = 0.0
+        if self.use_direction_matching:
+            # 検出の予想方向を計算（最後の位置から現在の位置へ）
+            last_positions = self.position_history.get(track_id, [])
+            if len(last_positions) >= 1:
+                last_frame, last_x, last_y, last_source, last_direction = last_positions[-1]
+                dx = detection[0] - last_x
+                dy = detection[1] - last_y
+                
+                if dx != 0 or dy != 0:
+                    detection_direction = np.arctan2(dy, dx)
+                    track_direction = self.get_last_direction(track_id)
+                    
+                    if track_direction is not None:
+                        direction_diff = self.compute_direction_difference(detection_direction, track_direction)
+                        
+                        # 方向差が閾値を超える場合はペナルティ
+                        if direction_diff > self.direction_threshold:
+                            direction_cost = direction_diff * 10  # 大きなペナルティ
+                        else:
+                            direction_cost = direction_diff
+        
+        # 総合コスト（距離と方向の重み付き和）
+        total_cost = self.distance_weight * distance + self.direction_weight * direction_cost
+        
+        return total_cost, distance, direction_cost
+        
     def release_id(self, obj_id, current_frame):
         """IDを解放し、見失った魚として記録（30フレーム以上見失った場合）"""
         if obj_id in self.active_tracks:
@@ -389,27 +470,40 @@ class ObjectTracker:
             # 物体の位置情報を取得
             bbox = det.xywh[0].cpu().numpy()  # x, y, w, h
             
-            # 既存の追跡とマッチング（200ピクセル以内）
+            # 既存の追跡とマッチング（距離と方向を考慮）
             matched = False
-            min_distance = float('inf')
+            min_cost = float('inf')
             best_match_id = None
             
             for track_id, track_info in list(self.active_tracks.items()):
                 if track_id in current_detections:
                     continue
+                
+                # 距離と方向を考慮したマッチングコストを計算
+                if self.use_direction_matching:
+                    cost_result = self.compute_enhanced_matching_cost(bbox, track_id)
+                    if isinstance(cost_result, tuple):
+                        total_cost, distance, direction_cost = cost_result
+                    else:
+                        total_cost = cost_result
+                        distance = float('inf')
+                        direction_cost = 0.0
                     
-                # 既存の追跡と新しい検出の距離を計算（200ピクセル以内）
-                if track_id in self.track_history and len(self.track_history[track_id]) > 0:
-                    old_bbox = self.track_history[track_id][-1]
-                    distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
-                    
-                    # 距離が閾値以下の場合、候補として記録（200ピクセル以内）
-                    if distance < 200:
-                        if distance < min_distance:
-                            min_distance = distance
+                    if total_cost < min_cost:
+                        min_cost = total_cost
+                        best_match_id = track_id
+                        print(f"Enhanced matching: Track {track_id}, cost={total_cost:.2f}, distance={distance:.2f}, direction_cost={direction_cost:.3f}")
+                else:
+                    # 従来の距離ベースマッチング
+                    if track_id in self.track_history and len(self.track_history[track_id]) > 0:
+                        old_bbox = self.track_history[track_id][-1]
+                        distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
+                        
+                        if distance < 200 and distance < min_cost:
+                            min_cost = distance
                             best_match_id = track_id
             
-            # 最適なマッチを見つけた場合（200ピクセル以内）
+            # 最適なマッチを見つけた場合（距離と方向を考慮）
             if best_match_id is not None:
                 current_detections.add(best_match_id)
                 matched = True
@@ -418,6 +512,7 @@ class ObjectTracker:
                 self.active_tracks[best_match_id] = bbox
                 # 位置履歴に追加（動きの方向も計算される）
                 self.update_position_history(best_match_id, frame_id, bbox[0], bbox[1], "detection")
+                print(f"Matched detection to track {best_match_id} with enhanced matching")
             
             # 既存の追跡にマッチしなかった場合、見失った魚のIDを再利用（200ピクセル以内）
             if not matched:
