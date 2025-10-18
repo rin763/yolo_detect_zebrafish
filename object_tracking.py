@@ -158,9 +158,10 @@ class ObjectTracker:
         self.reuse_distance_threshold = 150  # ID再利用の距離閾値
         self.max_lost_frames = 60  # IDを保持する最大フレーム数
         
-        # 破棄されたIDを記録するシステム
-        self.discarded_ids = set()  # 破棄されたIDのセット
+        # 破棄されたIDを記録するシステム（位置情報も含む）
+        self.discarded_ids = {}  # {id: {'position': [x, y], 'discarded_frame': frame_id}}
         self.max_discarded_ids = 20  # 記録する最大破棄ID数
+        self.discarded_id_reuse_distance = 100  # 破棄ID再利用の距離閾値
         
         # LSTM予測ベース検出の設定
         self.use_lstm_detection = True  # LSTM予測を検出として使用するか
@@ -169,8 +170,8 @@ class ObjectTracker:
         
         # 動きの方向ベースマッチングの設定
         self.use_direction_matching = True  # 動きの方向を考慮したマッチングを使用するか
-        self.direction_weight = 0.3  # 方向の重み（0.0-1.0）
-        self.distance_weight = 0.7  # 距離の重み（0.0-1.0）
+        self.direction_weight = 0.2  # 方向の重み（0.0-1.0）
+        self.distance_weight = 0.8  # 距離の重み（0.0-1.0）
         self.direction_threshold = 1.0  # 方向差の閾値（ラジアン）
         
     def predict_next_position(self, track_id):
@@ -315,8 +316,8 @@ class ObjectTracker:
         """新しいIDを取得（破棄されたIDを優先的に再利用）"""
         # 破棄されたIDがあれば再利用
         if self.discarded_ids:
-            reused_id = min(self.discarded_ids)  # 最小のIDを再利用
-            self.discarded_ids.remove(reused_id)
+            reused_id = min(self.discarded_ids.keys())  # 最小のIDを再利用
+            del self.discarded_ids[reused_id]
             print(f"Reusing discarded ID: {reused_id}")
             return reused_id
         
@@ -324,6 +325,45 @@ class ObjectTracker:
         new_id = self.next_id
         self.next_id += 1
         return new_id
+    
+    def add_discarded_id(self, fish_id, position, frame_id):
+        """破棄されたIDを記録（位置情報も含む）"""
+        self.discarded_ids[fish_id] = {
+            'position': position[:2].copy(),  # x, y座標のみ
+            'discarded_frame': frame_id
+        }
+        
+        # 最大数を超えた場合は古いものを削除
+        if len(self.discarded_ids) > self.max_discarded_ids:
+            # 最も古いIDを削除
+            oldest_id = min(self.discarded_ids.keys(), 
+                          key=lambda x: self.discarded_ids[x]['discarded_frame'])
+            del self.discarded_ids[oldest_id]
+            print(f"Removed oldest discarded ID {oldest_id} from discarded_ids")
+        
+        print(f"Recorded discarded ID {fish_id} at position {position[:2]}")
+    
+    def find_nearest_discarded_id(self, new_position):
+        """新しい位置に最も近い破棄IDを検索"""
+        if not self.discarded_ids:
+            return None
+        
+        min_distance = float('inf')
+        nearest_id = None
+        
+        for discarded_id, info in self.discarded_ids.items():
+            discarded_position = info['position']
+            distance = np.linalg.norm(np.array(new_position[:2]) - np.array(discarded_position))
+            
+            if distance < self.discarded_id_reuse_distance and distance < min_distance:
+                min_distance = distance
+                nearest_id = discarded_id
+        
+        if nearest_id is not None:
+            print(f"Found nearest discarded ID {nearest_id} at distance {min_distance:.2f}")
+            return nearest_id, min_distance
+        else:
+            return None
     
     def get_last_direction(self, track_id):
         """指定されたトラックの最後の動きの方向を取得"""
@@ -409,6 +449,10 @@ class ObjectTracker:
                 'lost_frames': 0,
                 'last_seen_frame': current_frame
             }
+            
+            # 破棄されたIDとして位置情報も記録
+            self.add_discarded_id(obj_id, self.active_tracks[obj_id], current_frame)
+            
             del self.active_tracks[obj_id]
         if obj_id in self.missed_frames:
             del self.missed_frames[obj_id]
@@ -427,7 +471,7 @@ class ObjectTracker:
             # フレーム数が上限を超えている場合は破棄されたIDとして記録
             if fish_info['lost_frames'] > self.max_lost_frames:
                 del self.lost_fish[fish_id]
-                self.add_discarded_id(fish_id)
+                self.add_discarded_id(fish_id, fish_info['last_position'], fish_info['last_seen_frame'])
                 continue
                 
             # 距離を計算
@@ -441,17 +485,6 @@ class ObjectTracker:
         
         return reusable_id
     
-    def add_discarded_id(self, fish_id):
-        """破棄されたIDを記録（20個まで）"""
-        if len(self.discarded_ids) < self.max_discarded_ids:
-            self.discarded_ids.add(fish_id)
-            print(f"Added discarded ID {fish_id} to reuse pool (total: {len(self.discarded_ids)})")
-        else:
-            # 最大数に達している場合は、最も古いIDを削除して新しいIDを追加
-            oldest_id = max(self.discarded_ids)
-            self.discarded_ids.remove(oldest_id)
-            self.discarded_ids.add(fish_id)
-            print(f"Replaced discarded ID {oldest_id} with {fish_id}")
     
     def preprocess_detection(self, detection):
         # YOLOの検出結果をLSTMの入力形式に変換
@@ -530,16 +563,34 @@ class ObjectTracker:
                     self.update_position_history(reusable_id, frame_id, bbox[0], bbox[1], "detection")
                     print(f"Reused ID {reusable_id} for fish near position {bbox[:2]}")
                 else:
-                    # 新しいIDを作成（破棄されたIDを優先的に再利用）
-                    new_id = self.get_new_id()
-                    current_detections.add(new_id)
-                    self.active_tracks[new_id] = bbox
-                    self.track_history[new_id] = deque(maxlen=self.sequence_length)
-                    self.track_history[new_id].append(self.preprocess_detection(bbox))
-                    self.missed_frames[new_id] = 0
-                    # 位置履歴に追加（動きの方向も計算される）
-                    self.update_position_history(new_id, frame_id, bbox[0], bbox[1], "detection")
-                    print(f"Created new ID {new_id} for fish at position {bbox[:2]}")
+                    # 破棄されたIDの再利用を試行
+                    result = self.find_nearest_discarded_id(bbox)
+                    if result is not None:
+                        nearest_discarded_id, distance = result
+                        # 破棄されたIDを再利用
+                        del self.discarded_ids[nearest_discarded_id]
+                        print(f"Reusing discarded ID {nearest_discarded_id} for new detection at distance {distance:.2f}")
+                        
+                        # 破棄されたIDで再作成
+                        current_detections.add(nearest_discarded_id)
+                        self.active_tracks[nearest_discarded_id] = bbox
+                        self.track_history[nearest_discarded_id] = deque(maxlen=self.sequence_length)
+                        self.track_history[nearest_discarded_id].append(self.preprocess_detection(bbox))
+                        self.missed_frames[nearest_discarded_id] = 0
+                        # 位置履歴に追加（動きの方向も計算される）
+                        self.update_position_history(nearest_discarded_id, frame_id, bbox[0], bbox[1], "detection")
+                        print(f"Reused discarded ID {nearest_discarded_id} for fish at position {bbox[:2]}")
+                    else:
+                        # 新しいIDを作成（破棄されたIDを優先的に再利用）
+                        new_id = self.get_new_id()
+                        current_detections.add(new_id)
+                        self.active_tracks[new_id] = bbox
+                        self.track_history[new_id] = deque(maxlen=self.sequence_length)
+                        self.track_history[new_id].append(self.preprocess_detection(bbox))
+                        self.missed_frames[new_id] = 0
+                        # 位置履歴に追加（動きの方向も計算される）
+                        self.update_position_history(new_id, frame_id, bbox[0], bbox[1], "detection")
+                        print(f"Created new ID {new_id} for fish at position {bbox[:2]}")
         
         # 見失った物体の処理（30フレーム以上見失った場合） 
         for track_id in list(self.active_tracks.keys()):
