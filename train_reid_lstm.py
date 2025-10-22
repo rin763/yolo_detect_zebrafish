@@ -1,25 +1,19 @@
-import cv2
-import numpy as np
 import torch
 import torch.nn as nn
-from ultralytics import YOLO
-from collections import deque
+import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import cv2
 import os
-from object_tracking import ObjectTracker
+from collections import deque
 
-from tqdm import tqdm
-#   import shutil
-#       if not os.path.exists(dst):
-#            shutil.move(src, dst)
 class ReIDTrackingDataset(Dataset):
-    """Re-ID用のトラッキングデータセット（位置+速度情報対応）"""
+    """Re-ID用のトラッキングデータセット"""
     def __init__(self, data_dir, sequence_length=10, feature_dim=256):
         self.sequence_length = sequence_length
         self.feature_dim = feature_dim
         self.sequences = []
         self.motion_targets = []
-        self.velocity_targets = []
         self.feature_targets = []
         self.confidence_targets = []
         
@@ -31,61 +25,22 @@ class ReIDTrackingDataset(Dataset):
                 # 十分なデータがある場合のみ使用
                 if len(track_data) >= sequence_length + 1:
                     for i in range(len(track_data) - sequence_length):
-                        # 位置情報 [x, y, w, h] を取得
-                        sequence_positions = track_data[i:i+sequence_length, 1:5]
-                        next_position = track_data[i+sequence_length, 1:5]
+                        sequence = track_data[i:i+sequence_length]
+                        next_position = track_data[i+sequence_length]
                         
-                        # 速度情報を計算して追加
-                        sequence_with_velocity = self.add_velocity_features(sequence_positions)
-                        
-                        # 移動予測ターゲット（位置）
-                        motion_target = next_position  # [x, y, w, h]
-                        
-                        # 速度予測ターゲット
-                        velocity_target = self.calculate_velocity_target(sequence_positions, next_position)
+                        # 移動予測ターゲット
+                        motion_target = next_position[:4]  # [x, y, w, h]
                         
                         # Re-ID特徴量ターゲット（移動パターンから生成）
-                        feature_target = self.generate_feature_target(sequence_positions, next_position)
+                        feature_target = self.generate_feature_target(sequence, next_position)
                         
                         # 信頼度ターゲット（移動の一貫性から計算）
-                        confidence_target = self.calculate_confidence_target(sequence_positions, next_position)
+                        confidence_target = self.calculate_confidence_target(sequence, next_position)
                         
-                        self.sequences.append(sequence_with_velocity)
+                        self.sequences.append(sequence)
                         self.motion_targets.append(motion_target)
-                        self.velocity_targets.append(velocity_target)
                         self.feature_targets.append(feature_target)
                         self.confidence_targets.append(confidence_target)
-    
-    def add_velocity_features(self, positions):
-        """位置情報に速度情報を追加して6次元特徴量を作成"""
-        sequence_with_velocity = []
-        
-        for i in range(len(positions)):
-            x, y, w, h = positions[i]
-            
-            # 速度を計算（前フレームとの差分）
-            if i == 0:
-                vx, vy = 0.0, 0.0  # 最初のフレームは速度0
-            else:
-                vx = x - positions[i-1][0]
-                vy = y - positions[i-1][1]
-            
-            # [x, y, w, h, vx, vy] の6次元特徴量
-            sequence_with_velocity.append([x, y, w, h, vx, vy])
-        
-        return np.array(sequence_with_velocity)
-    
-    def calculate_velocity_target(self, sequence_positions, next_position):
-        """次のフレームの速度を計算"""
-        if len(sequence_positions) < 2:
-            return [0.0, 0.0]
-        
-        # 最後の位置と次の位置の差分から速度を計算
-        last_position = sequence_positions[-1]
-        vx = next_position[0] - last_position[0]
-        vy = next_position[1] - last_position[1]
-        
-        return [vx, vy]
     
     def generate_feature_target(self, sequence, next_position):
         """移動パターンからRe-ID特徴量を生成"""
@@ -160,26 +115,22 @@ class ReIDTrackingDataset(Dataset):
     
     def __getitem__(self, idx):
         return (
-            torch.FloatTensor(self.sequences[idx]),           # [sequence_length, 6] - [x, y, w, h, vx, vy]
-            torch.FloatTensor(self.motion_targets[idx]),     # [4] - [x, y, w, h]
-            torch.FloatTensor(self.velocity_targets[idx]),    # [2] - [vx, vy]
-            torch.FloatTensor(self.feature_targets[idx]),     # [256] - Re-ID特徴量
-            torch.FloatTensor([self.confidence_targets[idx]]) # [1] - 信頼度
+            torch.FloatTensor(self.sequences[idx]),
+            torch.FloatTensor(self.motion_targets[idx]),
+            torch.FloatTensor(self.feature_targets[idx]),
+            torch.FloatTensor([self.confidence_targets[idx]])
         )
 
 class LSTMMotionPredictor(nn.Module):
-    """LSTMベースの移動予測と特徴抽出モデル（Re-ID用、位置+速度対応）"""
-    def __init__(self, input_size=6, hidden_size=128, num_layers=2, feature_dim=256):
+    """LSTMベースの移動予測と特徴抽出モデル"""
+    def __init__(self, input_size=4, hidden_size=128, num_layers=2, feature_dim=256):
         super(LSTMMotionPredictor, self).__init__()
         
-        # LSTM層（移動パターンの学習）- 6次元入力 [x, y, w, h, vx, vy]
+        # LSTM層（移動パターンの学習）
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
         
-        # 位置予測ヘッド
+        # 移動予測ヘッド
         self.motion_head = nn.Linear(hidden_size, 4)  # [x, y, w, h]の予測
-        
-        # 速度予測ヘッド
-        self.velocity_head = nn.Linear(hidden_size, 2)  # [vx, vy]の予測
         
         # 特徴抽出ヘッド（Re-ID用）
         self.feature_head = nn.Sequential(
@@ -202,11 +153,10 @@ class LSTMMotionPredictor(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: [batch_size, sequence_length, 6] - [x, y, w, h, vx, vy]の時系列データ
+            x: [batch_size, sequence_length, 4] - [x, y, w, h]の時系列データ
         Returns:
             dict: {
                 'motion_pred': [batch_size, 4] - 次の位置予測,
-                'velocity_pred': [batch_size, 2] - 次の速度予測,
                 'features': [batch_size, feature_dim] - Re-ID特徴量,
                 'confidence': [batch_size, 1] - 予測信頼度
             }
@@ -216,37 +166,22 @@ class LSTMMotionPredictor(nn.Module):
         
         # 各ヘッドで予測
         motion_pred = self.motion_head(last_output)
-        velocity_pred = self.velocity_head(last_output)
         features = self.feature_head(last_output)
         confidence = self.confidence_head(last_output)
         
         return {
             'motion_pred': motion_pred,
-            'velocity_pred': velocity_pred,
             'features': features,
             'confidence': confidence,
             'hidden_state': hidden,
             'cell_state': cell
         }
 
-def collect_training_data(video_paths, output_dir, model_path):
-    """教師データを収集する関数"""
-    os.makedirs(output_dir, exist_ok=True)
+def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path="best_reid_lstm_model.pth"):
+    """Re-ID用LSTMモデルの学習"""
     
-    # トラッカーの初期化
-    tracker = ObjectTracker(model_path)
-    
-    # 各動画からデータを収集
-    for i, video_path in enumerate(video_paths):
-        print(f"\nCollecting data from video {i+1}/{len(video_paths)}: {video_path}")
-        tracker.collect_training_data(video_path, output_dir)
-    
-    print("\nData collection completed!")
-
-def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_size=32, epochs=100, learning_rate=0.001):
-    """Re-ID用LSTMモデルをトレーニングする関数"""
     # デバイス設定
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"使用デバイス: {device}")
     
     # データセットの準備
@@ -263,39 +198,37 @@ def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_s
         return
     
     # データローダー
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32)
     
-    # モデルの初期化（Re-ID用）
+    # モデルの初期化
     model = LSTMMotionPredictor().to(device)
     
     # 損失関数とオプティマイザ
     motion_criterion = nn.MSELoss()
-    velocity_criterion = nn.MSELoss()
     feature_criterion = nn.MSELoss()
     confidence_criterion = nn.MSELoss()
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=10)
     
     # 最良の検証損失を記録
     best_val_loss = float('inf')
     
-    print("\nRe-ID用LSTM学習開始（位置+速度対応）...")
+    print("\n学習開始...")
+    epochs = 100
     
     for epoch in range(epochs):
         # 訓練フェーズ
         model.train()
         train_loss = 0.0
         train_motion_loss = 0.0
-        train_velocity_loss = 0.0
         train_feature_loss = 0.0
         train_confidence_loss = 0.0
         
-        for batch_idx, (sequences, motion_targets, velocity_targets, feature_targets, confidence_targets) in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{epochs}")):
+        for batch_idx, (sequences, motion_targets, feature_targets, confidence_targets) in enumerate(train_loader):
             sequences = sequences.to(device)
             motion_targets = motion_targets.to(device)
-            velocity_targets = velocity_targets.to(device)
             feature_targets = feature_targets.to(device)
             confidence_targets = confidence_targets.to(device)
             
@@ -306,19 +239,17 @@ def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_s
             
             # 各損失を計算
             motion_loss = motion_criterion(outputs['motion_pred'], motion_targets)
-            velocity_loss = velocity_criterion(outputs['velocity_pred'], velocity_targets)
             feature_loss = feature_criterion(outputs['features'], feature_targets)
             confidence_loss = confidence_criterion(outputs['confidence'], confidence_targets)
             
             # 総合損失（重み付き）
-            total_loss = motion_loss + 0.8 * velocity_loss + 0.5 * feature_loss + 0.3 * confidence_loss
+            total_loss = motion_loss + 0.5 * feature_loss + 0.3 * confidence_loss
             
             total_loss.backward()
             optimizer.step()
             
             train_loss += total_loss.item()
             train_motion_loss += motion_loss.item()
-            train_velocity_loss += velocity_loss.item()
             train_feature_loss += feature_loss.item()
             train_confidence_loss += confidence_loss.item()
             
@@ -327,7 +258,6 @@ def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_s
                 print(f"Epoch {epoch+1}/{epochs}, Batch {batch_idx}, "
                       f"Total Loss: {total_loss.item():.4f}, "
                       f"Motion: {motion_loss.item():.4f}, "
-                      f"Velocity: {velocity_loss.item():.4f}, "
                       f"Feature: {feature_loss.item():.4f}, "
                       f"Confidence: {confidence_loss.item():.4f}")
         
@@ -335,30 +265,26 @@ def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_s
         model.eval()
         val_loss = 0.0
         val_motion_loss = 0.0
-        val_velocity_loss = 0.0
         val_feature_loss = 0.0
         val_confidence_loss = 0.0
         
         with torch.no_grad():
-            for sequences, motion_targets, velocity_targets, feature_targets, confidence_targets in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}/{epochs}"):
+            for sequences, motion_targets, feature_targets, confidence_targets in val_loader:
                 sequences = sequences.to(device)
                 motion_targets = motion_targets.to(device)
-                velocity_targets = velocity_targets.to(device)
                 feature_targets = feature_targets.to(device)
                 confidence_targets = confidence_targets.to(device)
                 
                 outputs = model(sequences)
                 
                 motion_loss = motion_criterion(outputs['motion_pred'], motion_targets)
-                velocity_loss = velocity_criterion(outputs['velocity_pred'], velocity_targets)
                 feature_loss = feature_criterion(outputs['features'], feature_targets)
                 confidence_loss = confidence_criterion(outputs['confidence'], confidence_targets)
                 
-                total_loss = motion_loss + 0.8 * velocity_loss + 0.5 * feature_loss + 0.3 * confidence_loss
+                total_loss = motion_loss + 0.5 * feature_loss + 0.3 * confidence_loss
                 
                 val_loss += total_loss.item()
                 val_motion_loss += motion_loss.item()
-                val_velocity_loss += velocity_loss.item()
                 val_feature_loss += feature_loss.item()
                 val_confidence_loss += confidence_loss.item()
         
@@ -368,10 +294,8 @@ def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_s
         
         print(f"\nEpoch {epoch+1}/{epochs}:")
         print(f"学習 - Total: {avg_train_loss:.4f}, Motion: {train_motion_loss/len(train_loader):.4f}, "
-              f"Velocity: {train_velocity_loss/len(train_loader):.4f}, "
               f"Feature: {train_feature_loss/len(train_loader):.4f}, Confidence: {train_confidence_loss/len(train_loader):.4f}")
         print(f"検証 - Total: {avg_val_loss:.4f}, Motion: {val_motion_loss/len(val_loader):.4f}, "
-              f"Velocity: {val_velocity_loss/len(val_loader):.4f}, "
               f"Feature: {val_feature_loss/len(val_loader):.4f}, Confidence: {val_confidence_loss/len(val_loader):.4f}")
         
         # 学習率スケジューリング
@@ -385,57 +309,14 @@ def train_reid_lstm_model(train_data_dir, val_data_dir, model_save_path, batch_s
         
         print("-" * 80)
     
-    print(f"\nRe-ID用LSTM学習完了！")
+    print(f"\n学習完了！")
     print(f"最良検証損失: {best_val_loss:.4f}")
     print(f"モデル保存先: {model_save_path}")
 
 if __name__ == "__main__":
-    print("=== Re-ID用LSTMモデル学習システム ===")
+    # データディレクトリのパス
+    train_data_dir = "processed_datasets/train"  # 学習データディレクトリ
+    val_data_dir = "processed_datasets/val"      # 検証データディレクトリ
     
-    video_paths = [
-        "./video/processed_train_video_left.mp4",
-        "./video/processed_train_video_right.mp4"
-    ]
-    model_path = "./train_results/weights/best.pt"
-    train_data_dir = "train_data"
-    val_data_dir = "val_data"
-    model_save_path = "best_reid_lstm_model.pth"  # Re-ID用モデル名に変更
-
-    # 教師データの収集
-    print("1. 教師データの収集中...")
-    collect_training_data(video_paths, train_data_dir, model_path)
-    
-    # データを訓練用と検証用に分割
-    print("2. データの分割中...")
-    os.makedirs(val_data_dir, exist_ok=True)
-    track_files = os.listdir(train_data_dir)
-    val_count = int(len(track_files) * 0.2)
-    
-    for i, file in enumerate(track_files):
-        if i < val_count:
-            src = os.path.join(train_data_dir, file)
-            dst = os.path.join(val_data_dir, file)
-
-            # Windows用
-            if os.path.exists(dst):
-                os.remove(dst)
-            os.rename(src, dst)
-    
-    print(f"学習データ: {len(track_files) - val_count} ファイル")
-    print(f"検証データ: {val_count} ファイル")
-    
-    # Re-ID用LSTMモデルのトレーニング
-    print("3. Re-ID用LSTMモデルの学習開始...")
-    train_reid_lstm_model(
-        train_data_dir=train_data_dir,
-        val_data_dir=val_data_dir,
-        model_save_path=model_save_path,
-        batch_size=32,
-        epochs=100,
-        learning_rate=0.001
-    )
-    
-    print("\n=== 学習完了 ===")
-    print(f"Re-ID用LSTMモデルが保存されました: {model_save_path}")
-    print("このモデルをlstm_reid_tracking.pyで使用できます。")
-
+    # Re-ID用LSTMモデルの学習
+    train_reid_lstm_model(train_data_dir, val_data_dir)
