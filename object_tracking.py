@@ -4,7 +4,7 @@ from ultralytics import YOLO
 from collections import deque
 import os
 import torch
-from lstm_tracker import LSTMEnhancedTracker
+from lstm_kalman_tracker import LSTMKalmanTracker
 
 class ObjectTracker:
     def __init__(self, model_path, sequence_length=10, max_fish=20, use_lstm=True):
@@ -18,15 +18,14 @@ class ObjectTracker:
         self.max_fish = max_fish
         self.use_lstm = use_lstm
         
-        # LSTM強化トラッカーの初期化
+        # LSTM+カルマンフィルタ強化トラッカーの初期化
         if self.use_lstm:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            self.lstm_tracker = LSTMEnhancedTracker(
+            self.lstm_kalman_tracker = LSTMKalmanTracker(
                 sequence_length=sequence_length,
-                prediction_horizon=5,
                 device=device
             )
-            print(f"LSTM tracker initialized on {device}")
+            print(f"LSTM+Kalman tracker initialized on {device}")
         
         # 物体の追跡履歴を保存
         self.track_history = {}
@@ -212,21 +211,21 @@ class ObjectTracker:
                         else:
                             direction_cost = direction_diff
         
-        # LSTM予測コスト（LSTMが有効な場合）
+        # LSTM+カルマンフィルタ予測コスト（LSTMが有効な場合）
         lstm_cost = 0.0
         lstm_confidence = 0.0
         if self.use_lstm and track_id in self.position_history:
-            # LSTMトラッカーのシーケンスを更新
-            self.lstm_tracker.update_track_sequence(track_id, self.position_history[track_id])
+            # LSTM+カルマンフィルタトラッカーのシーケンスを更新
+            self.lstm_kalman_tracker.update_track_sequence(track_id, self.position_history[track_id])
             
-            # Re-IDスコアを計算
+            # ハイブリッドRe-IDスコアを計算
             detection_position = detection[:2]
-            lstm_score = self.lstm_tracker.compute_reid_score(track_id, detection_position)
-            lstm_confidence = lstm_score
+            hybrid_score = self.lstm_kalman_tracker.compute_hybrid_reid_score(track_id, detection_position)
+            lstm_confidence = hybrid_score
             
             # スコアが低い場合はペナルティ
-            if lstm_score < self.lstm_matching_threshold:
-                lstm_cost = (self.lstm_matching_threshold - lstm_score) * 50
+            if hybrid_score < self.lstm_matching_threshold:
+                lstm_cost = (self.lstm_matching_threshold - hybrid_score) * 50
         
         # 総合コスト（距離、方向、LSTM予測の重み付き和）
         total_cost = (self.distance_weight * distance + 
@@ -246,11 +245,11 @@ class ObjectTracker:
                 'predicted_positions': []  # LSTM予測位置を保存
             }
             
-            # LSTM予測位置を計算（見失った魚の追跡継続）
+            # LSTM+カルマンフィルタ予測位置を計算（見失った魚の追跡継続）
             if self.use_lstm and obj_id in self.position_history:
-                predicted_positions = self.lstm_tracker.predict_lost_track_positions(obj_id, frames_ahead=10)
+                predicted_positions = self.lstm_kalman_tracker.predict_lost_track_positions(obj_id, frames_ahead=10)
                 self.lost_fish[obj_id]['predicted_positions'] = predicted_positions
-                print(f"Generated {len(predicted_positions)} predicted positions for lost fish {obj_id}")
+                print(f"Generated {len(predicted_positions)} hybrid predicted positions for lost fish {obj_id}")
             
             # 破棄されたIDとして位置情報も記録
             self.add_discarded_id(obj_id, self.active_tracks[obj_id], current_frame)
@@ -281,10 +280,10 @@ class ObjectTracker:
             last_pos = fish_info['last_position']
             distance = np.linalg.norm(np.array(new_position[:2]) - np.array(last_pos[:2]))
             
-            # LSTM予測位置との距離も考慮
-            lstm_score = 0.0
+            # LSTM+カルマンフィルタ予測位置との距離も考慮
+            hybrid_score = 0.0
             if self.use_lstm and 'predicted_positions' in fish_info and fish_info['predicted_positions']:
-                # 予測位置との最小距離を計算
+                # ハイブリッド予測位置との最小距離を計算
                 min_pred_distance = float('inf')
                 for pred_pos in fish_info['predicted_positions']:
                     pred_distance = np.linalg.norm(np.array(new_position[:2]) - pred_pos)
@@ -292,10 +291,10 @@ class ObjectTracker:
                 
                 # 予測位置が近い場合はスコアを上げる
                 if min_pred_distance < 50:  # 50ピクセル以内
-                    lstm_score = max(0, 1 - min_pred_distance / 50)
+                    hybrid_score = max(0, 1 - min_pred_distance / 50)
             
-            # 総合スコアを計算（距離とLSTM予測の重み付き）
-            total_score = 0.7 * (1 - min(distance / self.reuse_distance_threshold, 1.0)) + 0.3 * lstm_score
+            # 総合スコアを計算（距離とハイブリッド予測の重み付き）
+            total_score = 0.7 * (1 - min(distance / self.reuse_distance_threshold, 1.0)) + 0.3 * hybrid_score
             
             # 最も良いスコアのIDを選択
             if total_score > 0.5 and (reusable_id is None or total_score > best_lstm_score):
@@ -356,7 +355,7 @@ class ObjectTracker:
                     if track_id in self.track_history and len(self.track_history[track_id]) > 0:
                         old_bbox = self.track_history[track_id][-1]
                         distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
-                        
+                
                         if distance < 200 and distance < min_cost:
                             min_cost = distance
                             best_match_id = track_id
@@ -428,9 +427,9 @@ class ObjectTracker:
                     self.release_id(track_id, frame_id)
                     print(f"Lost fish ID {track_id} after {missed_count} frames")
                     
-                    # LSTMトラッカーのクリーンアップ
+                    # LSTM+カルマンフィルタトラッカーのクリーンアップ
                     if self.use_lstm:
-                        self.lstm_tracker.cleanup_track(track_id)
+                        self.lstm_kalman_tracker.cleanup_track(track_id)
 
     def process_video(self, video_path):
         cap = cv2.VideoCapture(video_path)
@@ -572,8 +571,13 @@ if __name__ == "__main__":
     # 動画のパスを指定
     video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3D_left.mp4"
     
-    print("Starting LSTM-enhanced object tracking...")
+    print("Starting LSTM+Kalman Filter enhanced object tracking...")
     print(f"Using device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+    print("Hybrid prediction features:")
+    print("  - LSTM neural network for pattern learning")
+    print("  - Kalman filter for motion prediction")
+    print("  - Hybrid Re-ID scoring system")
+    print("  - Enhanced lost fish tracking")
     
     # 動画の処理開始
     tracker.process_video(video_path) 

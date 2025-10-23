@@ -1,516 +1,579 @@
 import cv2
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from ultralytics import YOLO
 from collections import deque
 import os
-# from sklearn.metrics.pairwise import cosine_similarity  # 使用しないためコメントアウト
+import torch
+from lstm_tracker import LSTMEnhancedTracker
 
-class LSTMMotionPredictor(nn.Module):
-    """LSTMベースの移動予測と特徴抽出モデル"""
-    def __init__(self, input_size=4, hidden_size=128, num_layers=2, feature_dim=256):
-        super(LSTMMotionPredictor, self).__init__()
-        
-        # LSTM層（移動パターンの学習）
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.2)
-        
-        # 移動予測ヘッド
-        self.motion_head = nn.Linear(hidden_size, 4)  # [x, y, w, h]の予測
-        
-        # 特徴抽出ヘッド（Re-ID用）
-        self.feature_head = nn.Sequential(
-            nn.Linear(hidden_size, feature_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(feature_dim, feature_dim),
-            nn.ReLU(),
-            nn.Linear(feature_dim, feature_dim)
-        )
-        
-        # 信頼度予測ヘッド
-        self.confidence_head = nn.Sequential(
-            nn.Linear(hidden_size, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
-        )
-        
-    def forward(self, x):
-        """
-        Args:
-            x: [batch_size, sequence_length, 4] - [x, y, w, h]の時系列データ
-        Returns:
-            dict: {
-                'motion_pred': [batch_size, 4] - 次の位置予測,
-                'features': [batch_size, feature_dim] - Re-ID特徴量,
-                'confidence': [batch_size, 1] - 予測信頼度
-            }
-        """
-        lstm_out, (hidden, cell) = self.lstm(x)
-        last_output = lstm_out[:, -1, :]  # 最後のタイムステップの出力
-        
-        # 各ヘッドで予測
-        motion_pred = self.motion_head(last_output)
-        features = self.feature_head(last_output)
-        confidence = self.confidence_head(last_output)
-        
-        return {
-            'motion_pred': motion_pred,
-            'features': features,
-            'confidence': confidence,
-            'hidden_state': hidden,
-            'cell_state': cell
-        }
-
-class AppearanceFeatureExtractor(nn.Module):
-    """外観特徴抽出器（簡易版CNN）"""
-    def __init__(self, input_channels=3, feature_dim=256):
-        super(AppearanceFeatureExtractor, self).__init__()
-        
-        # 簡易CNN（実際の実装ではより複雑なCNNを使用）
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(input_channels, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4))
-        )
-        
-        self.fc = nn.Sequential(
-            nn.Linear(256 * 4 * 4, feature_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(feature_dim, feature_dim)
-        )
-        
-    def forward(self, x):
-        """
-        Args:
-            x: [batch_size, channels, height, width] - 画像パッチ
-        Returns:
-            features: [batch_size, feature_dim] - 外観特徴量
-        """
-        conv_out = self.conv_layers(x)
-        features = self.fc(conv_out.view(conv_out.size(0), -1))
-        return features
-
-class LSTMReIDTracker:
-    """LSTMベースのRe-IDトラッキングシステム"""
-    
-    def __init__(self, model_path, lstm_model_path=None, sequence_length=10):
-        # YOLOモデルの読み込み
+class ObjectTracker:
+    def __init__(self, model_path, sequence_length=10, max_fish=20, use_lstm=True):
+        # YOLOモデルの読み込み（model_pathがNoneの場合はスキップ）
         if model_path is not None:
             self.yolo = YOLO(model_path)
         else:
             self.yolo = None
-            
+        
         self.sequence_length = sequence_length
+        self.max_fish = max_fish
+        self.use_lstm = use_lstm
         
-        # LSTMモデルの初期化
-        self.lstm_model = LSTMMotionPredictor()
-        self.lstm_available = False
+        # LSTM強化トラッカーの初期化
+        if self.use_lstm:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.lstm_tracker = LSTMEnhancedTracker(
+                sequence_length=sequence_length,
+                prediction_horizon=5,
+                device=device
+            )
+            print(f"LSTM tracker initialized on {device}")
         
-        if lstm_model_path and os.path.exists(lstm_model_path):
-            try:
-                self.lstm_model.load_state_dict(torch.load(lstm_model_path))
-                self.lstm_model.eval()
-                self.lstm_available = True
-                print(f"LSTMモデルを読み込みました: {lstm_model_path}")
-            except Exception as e:
-                print(f"LSTMモデルの読み込みに失敗: {e}")
-                self.lstm_available = False
+        # 物体の追跡履歴を保存
+        self.track_history = {}
         
-        # 外観特徴抽出器の初期化
-        self.appearance_extractor = AppearanceFeatureExtractor()
-        self.appearance_extractor.eval()
+        # IDごとの位置履歴を保存（x, y座標、動きの方向）
+        self.position_history = {}  # {track_id: [(frame_id, x, y, source, direction_rad), ...]}
         
-        # トラッキング関連のデータ構造
-        self.next_id = 1
-        self.active_tracks = {}  # {track_id: {'bbox': [x,y,w,h], 'last_seen': frame_id, 'missed_frames': count}}
-        self.track_history = {}  # {track_id: deque([x,y,w,h], ...)}
-        self.motion_features = {}  # {track_id: [feature_vector]}
-        self.appearance_features = {}  # {track_id: [feature_vector]}
+        # 改善されたID管理システム
+        self.next_id = 1  # 次の新しいID
+        self.active_tracks = {}  # 現在追跡中の物体とそのID
+        self.missed_frames = {}  # 物体を見失ったフレーム数を記録
         
-        # 失われたトラックの管理
-        self.lost_tracks = {}  # {track_id: {'last_bbox': [x,y,w,h], 'lost_frames': count, 'last_features': [motion_feat, appearance_feat]}}
-        self.max_lost_frames = 30  # 最大失跡フレーム数
+        # 見失った魚の情報を記憶するシステム
+        self.lost_fish = {}  # {id: {'last_position': [x, y, w, h], 'lost_frames': count, 'last_seen_frame': frame_id}}
+        self.reuse_distance_threshold = 150  # ID再利用の距離閾値
+        self.max_lost_frames = 60  # IDを保持する最大フレーム数
         
-        # Re-ID設定
-        self.motion_similarity_threshold = 0.7  # 移動特徴の類似度閾値
-        self.appearance_similarity_threshold = 0.6  # 外観特徴の類似度閾値
-        self.distance_threshold = 150  # 距離閾値（ピクセル）
-        self.motion_weight = 0.4  # 移動特徴の重み
-        self.appearance_weight = 0.6  # 外観特徴の重み
+        # 破棄されたIDを記録するシステム（位置情報も含む）
+        self.discarded_ids = {}  # {id: {'position': [x, y], 'discarded_frame': frame_id}}
+        self.max_discarded_ids = 20  # 記録する最大破棄ID数
+        self.discarded_id_reuse_distance = 100  # 破棄ID再利用の距離閾値
         
-    def extract_appearance_features(self, frame, bbox):
-        """画像から外観特徴を抽出"""
-        try:
-            x, y, w, h = bbox
-            x1, y1 = int(x - w/2), int(y - h/2)
-            x2, y2 = int(x + w/2), int(y + h/2)
+        
+        # 動きの方向ベースマッチングの設定
+        self.use_direction_matching = True  # 動きの方向を考慮したマッチングを使用するか
+        self.direction_weight = 0.2  # 方向の重み（0.0-1.0）
+        self.distance_weight = 0.8  # 距離の重み（0.0-1.0）
+        self.direction_threshold = 1.0  # 方向差の閾値（ラジアン）
+        
+        # LSTM強化マッチングの設定
+        self.lstm_matching_threshold = 0.6  # LSTMマッチングの閾値
+        self.prediction_weight = 0.5  # 予測の重み
+        
+    
+    def update_position_history(self, track_id, frame_id, x, y, source="detection"):
+        """IDごとの位置履歴を更新（動きの方向も計算）"""
+        if track_id not in self.position_history:
+            self.position_history[track_id] = []
+        
+        # 動きの方向を計算
+        direction_rad = 0.0  # デフォルト値
+        if len(self.position_history[track_id]) > 0:
+            # 前の位置を取得
+            prev_frame, prev_x, prev_y, prev_source, prev_direction = self.position_history[track_id][-1]
             
-            # 画像パッチを抽出
-            patch = frame[y1:y2, x1:x2]
-            if patch.size == 0:
-                return None
-                
-            # リサイズしてテンソルに変換
-            patch_resized = cv2.resize(patch, (64, 64))
-            patch_tensor = torch.FloatTensor(patch_resized).permute(2, 0, 1).unsqueeze(0) / 255.0
+            # xとyの差を計算
+            dx = x - prev_x
+            dy = y - prev_y
             
-            with torch.no_grad():
-                features = self.appearance_extractor(patch_tensor)
-                return features.cpu().numpy().flatten()
-                
-        except Exception as e:
-            print(f"外観特徴抽出エラー: {e}")
+            # 動きがある場合のみ方向を計算
+            if dx != 0 or dy != 0:
+                direction_rad = np.arctan2(dy, dx)
+                print(f"Track {track_id}: dx={dx:.2f}, dy={dy:.2f}, direction={direction_rad:.3f} rad")
+        
+        # 位置履歴に追加（方向も含む）
+        self.position_history[track_id].append((frame_id, x, y, source, direction_rad))
+        
+        # 履歴が長すぎる場合は古いものを削除（メモリ節約）
+        if len(self.position_history[track_id]) > 1000:  # 最大1000フレーム分保持
+            self.position_history[track_id] = self.position_history[track_id][-500:]  # 最新500フレーム分のみ保持
+    
+        
+    def get_new_id(self):
+        """新しいIDを取得（破棄されたIDを優先的に再利用）"""
+        # 破棄されたIDがあれば再利用
+        if self.discarded_ids:
+            reused_id = min(self.discarded_ids.keys())  # 最小のIDを再利用
+            del self.discarded_ids[reused_id]
+            print(f"Reusing discarded ID: {reused_id}")
+            return reused_id
+        
+        # 破棄されたIDがない場合は新しいIDを作成
+        new_id = self.next_id
+        self.next_id += 1
+        return new_id
+    
+    def add_discarded_id(self, fish_id, position, frame_id):
+        """破棄されたIDを記録（位置情報も含む）"""
+        self.discarded_ids[fish_id] = {
+            'position': position[:2].copy(),  # x, y座標のみ
+            'discarded_frame': frame_id
+        }
+        
+        # 最大数を超えた場合は古いものを削除
+        if len(self.discarded_ids) > self.max_discarded_ids:
+            # 最も古いIDを削除
+            oldest_id = min(self.discarded_ids.keys(), 
+                          key=lambda x: self.discarded_ids[x]['discarded_frame'])
+            del self.discarded_ids[oldest_id]
+            print(f"Removed oldest discarded ID {oldest_id} from discarded_ids")
+        
+        print(f"Recorded discarded ID {fish_id} at position {position[:2]}")
+    
+    def find_nearest_discarded_id(self, new_position):
+        """新しい位置に最も近い破棄IDを検索"""
+        if not self.discarded_ids:
+            return None
+        
+        min_distance = float('inf')
+        nearest_id = None
+        
+        for discarded_id, info in self.discarded_ids.items():
+            discarded_position = info['position']
+            distance = np.linalg.norm(np.array(new_position[:2]) - np.array(discarded_position))
+            
+            if distance < self.discarded_id_reuse_distance and distance < min_distance:
+                min_distance = distance
+                nearest_id = discarded_id
+        
+        if nearest_id is not None:
+            print(f"Found nearest discarded ID {nearest_id} at distance {min_distance:.2f}")
+            return nearest_id, min_distance
+        else:
             return None
     
-    def predict_motion_and_features(self, track_id):
-        """LSTMで移動予測と特徴抽出"""
-        if not self.lstm_available or track_id not in self.track_history:
-            return None
-            
-        if len(self.track_history[track_id]) < self.sequence_length:
+    def get_last_direction(self, track_id):
+        """指定されたトラックの最後の動きの方向を取得"""
+        if track_id not in self.position_history or len(self.position_history[track_id]) < 2:
             return None
         
-        # 履歴からシーケンスを取得
-        history = list(self.track_history[track_id])
-        sequence = np.array(history[-self.sequence_length:])
+        # 最後の2つの位置から方向を計算
+        last_positions = self.position_history[track_id][-2:]
+        prev_frame, prev_x, prev_y, prev_source, prev_direction = last_positions[0]
+        curr_frame, curr_x, curr_y, curr_source, curr_direction = last_positions[1]
         
-        # テンソルに変換
-        sequence_tensor = torch.FloatTensor(sequence).unsqueeze(0)
+        # 実際の移動から方向を再計算（より正確）
+        dx = curr_x - prev_x
+        dy = curr_y - prev_y
         
-        with torch.no_grad():
-            output = self.lstm_model(sequence_tensor)
-            
-            return {
-                'motion_pred': output['motion_pred'].cpu().numpy()[0],
-                'features': output['features'].cpu().numpy()[0],
-                'confidence': output['confidence'].cpu().numpy()[0][0]
-            }
-    
-    def compute_similarity(self, features1, features2):
-        """特徴量の類似度を計算（コサイン類似度）"""
-        if features1 is None or features2 is None:
+        if dx == 0 and dy == 0:
             return 0.0
-            
-        # 正規化
-        features1_norm = features1 / (np.linalg.norm(features1) + 1e-8)
-        features2_norm = features2 / (np.linalg.norm(features2) + 1e-8)
         
-        # コサイン類似度
-        similarity = np.dot(features1_norm, features2_norm)
-        return max(0.0, similarity)
+        return np.arctan2(dy, dx)
     
-    def find_best_reid_match(self, detection_bbox, detection_appearance_feat, frame):
-        """Re-IDによる最適なマッチング"""
-        best_match_id = None
-        best_score = 0.0
+    def compute_direction_difference(self, dir1, dir2):
+        """2つの方向の差を計算（-πからπの範囲で正規化）"""
+        if dir1 is None or dir2 is None:
+            return float('inf')
         
-        # 1. アクティブトラックとのマッチング
-        for track_id in self.active_tracks.keys():
-            if track_id in self.motion_features:
-                # 距離チェック
-                track_bbox = self.active_tracks[track_id]['bbox']
-                distance = np.linalg.norm(np.array(detection_bbox[:2]) - np.array(track_bbox[:2]))
-                
-                if distance > self.distance_threshold:
-                    continue
-                
-                # LSTM予測を取得
-                lstm_output = self.predict_motion_and_features(track_id)
-                if lstm_output is None:
-                    continue
-                
-                # 移動特徴の類似度
-                motion_sim = self.compute_similarity(
-                    detection_appearance_feat,  # 簡易的に外観特徴を使用
-                    lstm_output['features']
-                )
-                
-                # 外観特徴の類似度
-                if track_id in self.appearance_features:
-                    appearance_sim = self.compute_similarity(
-                        detection_appearance_feat,
-                        self.appearance_features[track_id]
-                    )
-                else:
-                    appearance_sim = 0.0
-                
-                # 総合スコア
-                total_score = (self.motion_weight * motion_sim + 
-                             self.appearance_weight * appearance_sim)
-                
-                if total_score > best_score and total_score > 0.5:  # 閾値
-                    best_score = total_score
-                    best_match_id = track_id
+        diff = dir1 - dir2
         
-        # 2. 失われたトラックとのマッチング
-        for track_id, lost_info in self.lost_tracks.items():
-            # 距離チェック
-            last_bbox = lost_info['last_bbox']
-            distance = np.linalg.norm(np.array(detection_bbox[:2]) - np.array(last_bbox[:2]))
+        # -πからπの範囲に正規化
+        while diff > np.pi:
+            diff -= 2 * np.pi
+        while diff < -np.pi:
+            diff += 2 * np.pi
+        
+        return abs(diff)
+    
+    def compute_enhanced_matching_cost(self, detection, track_id):
+        """距離と方向を考慮したマッチングコストを計算（LSTM予測も含む）"""
+        if track_id not in self.track_history or len(self.track_history[track_id]) == 0:
+            return float('inf')
+        
+        # 基本的な距離コスト
+        old_bbox = self.track_history[track_id][-1]
+        distance = np.linalg.norm(detection[:2] - old_bbox[:2])
+        
+        # 距離が閾値を超える場合は除外
+        if distance > 200:
+            return float('inf')
+        
+        # 方向コスト
+        direction_cost = 0.0
+        if self.use_direction_matching:
+            # 検出の予想方向を計算（最後の位置から現在の位置へ）
+            last_positions = self.position_history.get(track_id, [])
+            if len(last_positions) >= 1:
+                last_frame, last_x, last_y, last_source, last_direction = last_positions[-1]
+                dx = detection[0] - last_x
+                dy = detection[1] - last_y
+                
+                if dx != 0 or dy != 0:
+                    detection_direction = np.arctan2(dy, dx)
+                    track_direction = self.get_last_direction(track_id)
+                    
+                    if track_direction is not None:
+                        direction_diff = self.compute_direction_difference(detection_direction, track_direction)
+                        
+                        # 方向差が閾値を超える場合はペナルティ
+                        if direction_diff > self.direction_threshold:
+                            direction_cost = direction_diff * 10  # 大きなペナルティ
+                        else:
+                            direction_cost = direction_diff
+        
+        # LSTM予測コスト（LSTMが有効な場合）
+        lstm_cost = 0.0
+        lstm_confidence = 0.0
+        if self.use_lstm and track_id in self.position_history:
+            # LSTMトラッカーのシーケンスを更新
+            self.lstm_tracker.update_track_sequence(track_id, self.position_history[track_id])
             
-            if distance > self.distance_threshold:
+            # Re-IDスコアを計算
+            detection_position = detection[:2]
+            lstm_score = self.lstm_tracker.compute_reid_score(track_id, detection_position)
+            lstm_confidence = lstm_score
+            
+            # スコアが低い場合はペナルティ
+            if lstm_score < self.lstm_matching_threshold:
+                lstm_cost = (self.lstm_matching_threshold - lstm_score) * 50
+        
+        # 総合コスト（距離、方向、LSTM予測の重み付き和）
+        total_cost = (self.distance_weight * distance + 
+                     self.direction_weight * direction_cost + 
+                     self.prediction_weight * lstm_cost)
+        
+        return total_cost, distance, direction_cost, lstm_cost, lstm_confidence
+        
+    def release_id(self, obj_id, current_frame):
+        """IDを解放し、見失った魚として記録（30フレーム以上見失った場合）"""
+        if obj_id in self.active_tracks:
+            # 見失った魚の情報を保存
+            self.lost_fish[obj_id] = {
+                'last_position': self.active_tracks[obj_id].copy(),
+                'lost_frames': 0,
+                'last_seen_frame': current_frame,
+                'predicted_positions': []  # LSTM予測位置を保存
+            }
+            
+            # LSTM予測位置を計算（見失った魚の追跡継続）
+            if self.use_lstm and obj_id in self.position_history:
+                predicted_positions = self.lstm_tracker.predict_lost_track_positions(obj_id, frames_ahead=10)
+                self.lost_fish[obj_id]['predicted_positions'] = predicted_positions
+                print(f"Generated {len(predicted_positions)} predicted positions for lost fish {obj_id}")
+            
+            # 破棄されたIDとして位置情報も記録
+            self.add_discarded_id(obj_id, self.active_tracks[obj_id], current_frame)
+            
+            del self.active_tracks[obj_id]
+        if obj_id in self.missed_frames:
+            del self.missed_frames[obj_id]
+        if obj_id in self.track_history:
+            del self.track_history[obj_id]
+        # 位置履歴は保持（分析用）
+        # if obj_id in self.position_history:
+        #     del self.position_history[obj_id]
+    
+    def find_reusable_id(self, new_position, current_frame):
+        """見失った魚の中で再利用可能なIDを探す（LSTM予測も考慮）"""
+        reusable_id = None
+        min_distance = float('inf')
+        best_lstm_score = 0.0
+        
+        for fish_id, fish_info in list(self.lost_fish.items()):
+            # フレーム数が上限を超えている場合は破棄されたIDとして記録
+            if fish_info['lost_frames'] > self.max_lost_frames:
+                del self.lost_fish[fish_id]
+                self.add_discarded_id(fish_id, fish_info['last_position'], fish_info['last_seen_frame'])
                 continue
             
-            # 特徴量の類似度
-            if 'last_features' in lost_info:
-                last_motion_feat, last_appearance_feat = lost_info['last_features']
+            # 基本的な距離計算
+            last_pos = fish_info['last_position']
+            distance = np.linalg.norm(np.array(new_position[:2]) - np.array(last_pos[:2]))
+            
+            # LSTM予測位置との距離も考慮
+            lstm_score = 0.0
+            if self.use_lstm and 'predicted_positions' in fish_info and fish_info['predicted_positions']:
+                # 予測位置との最小距離を計算
+                min_pred_distance = float('inf')
+                for pred_pos in fish_info['predicted_positions']:
+                    pred_distance = np.linalg.norm(np.array(new_position[:2]) - pred_pos)
+                    min_pred_distance = min(min_pred_distance, pred_distance)
                 
-                # 移動特徴の類似度
-                motion_sim = self.compute_similarity(
-                    detection_appearance_feat,  # 簡易的に外観特徴を使用
-                    last_motion_feat
-                )
-                
-                # 外観特徴の類似度
-                appearance_sim = self.compute_similarity(
-                    detection_appearance_feat,
-                    last_appearance_feat
-                )
-                
-                # 総合スコア
-                total_score = (self.motion_weight * motion_sim + 
-                             self.appearance_weight * appearance_sim)
-                
-                if total_score > best_score and total_score > 0.6:  # 失われたトラックはより厳しい閾値
-                    best_score = total_score
-                    best_match_id = track_id
+                # 予測位置が近い場合はスコアを上げる
+                if min_pred_distance < 50:  # 50ピクセル以内
+                    lstm_score = max(0, 1 - min_pred_distance / 50)
+            
+            # 総合スコアを計算（距離とLSTM予測の重み付き）
+            total_score = 0.7 * (1 - min(distance / self.reuse_distance_threshold, 1.0)) + 0.3 * lstm_score
+            
+            # 最も良いスコアのIDを選択
+            if total_score > 0.5 and (reusable_id is None or total_score > best_lstm_score):
+                min_distance = distance
+                reusable_id = fish_id
+                best_lstm_score = total_score
         
-        return best_match_id, best_score
+        if reusable_id is not None:
+            print(f"Found reusable ID {reusable_id} with distance {min_distance:.2f} and LSTM score {best_lstm_score:.3f}")
+        
+        return reusable_id
     
-    def update_tracking(self, frame_id, detections, frame):
-        """Re-ID統合トラッキングの更新"""
+    
+    def preprocess_detection(self, detection):
+        # YOLOの検出結果をLSTMの入力形式に変換
+        x, y, w, h = detection
+        return np.array([x, y, w, h])
+    
+    def update_tracking(self, frame_id, detections):
+        # 見失った魚のフレーム数を更新（30フレーム以上見失った場合）
+        for fish_id in self.lost_fish:
+            self.lost_fish[fish_id]['lost_frames'] += 1
+        
+        # 現在のフレームで検出された物体のIDを記録
         current_detections = set()
         
-        for detection in detections:
-            # 検出結果を処理
-            bbox = detection.xywh[0].cpu().numpy()  # [x, y, w, h]
+        for det in detections:
+            # 物体の位置情報を取得
+            bbox = det.xywh[0].cpu().numpy()  # x, y, w, h
             
-            # 外観特徴を抽出
-            appearance_feat = self.extract_appearance_features(frame, bbox)
-            if appearance_feat is None:
-                continue
+            # 既存の追跡とマッチング（距離と方向を考慮）
+            matched = False
+            min_cost = float('inf')
+            best_match_id = None
             
-            # Re-IDによるマッチング
-            best_match_id, match_score = self.find_best_reid_match(bbox, appearance_feat, frame)
-            
-            if best_match_id is not None:
-                # 既存トラックの更新
-                current_detections.add(best_match_id)
-                self.active_tracks[best_match_id]['bbox'] = bbox
-                self.active_tracks[best_match_id]['last_seen'] = frame_id
-                self.active_tracks[best_match_id]['missed_frames'] = 0
+            for track_id, track_info in list(self.active_tracks.items()):
+                if track_id in current_detections:
+                    continue
                 
-                # 履歴を更新
-                self.track_history[best_match_id].append(bbox)
-                
-                # 特徴量を更新
-                self.appearance_features[best_match_id] = appearance_feat
-                
-                # LSTM特徴量を更新
-                lstm_output = self.predict_motion_and_features(best_match_id)
-                if lstm_output is not None:
-                    self.motion_features[best_match_id] = lstm_output['features']
-                
-                print(f"Re-ID成功: Track {best_match_id}, スコア: {match_score:.3f}")
-                
-                # 失われたトラックから削除
-                if best_match_id in self.lost_tracks:
-                    del self.lost_tracks[best_match_id]
+                # 距離と方向を考慮したマッチングコストを計算
+                if self.use_direction_matching:
+                    cost_result = self.compute_enhanced_matching_cost(bbox, track_id)
+                    if isinstance(cost_result, tuple) and len(cost_result) >= 5:
+                        total_cost, distance, direction_cost, lstm_cost, lstm_confidence = cost_result
+                    else:
+                        total_cost = cost_result
+                        distance = float('inf')
+                        direction_cost = 0.0
+                        lstm_cost = 0.0
+                        lstm_confidence = 0.0
                     
-            else:
-                # 新しいトラックの作成
-                new_id = self.next_id
-                self.next_id += 1
-                
-                current_detections.add(new_id)
-                self.active_tracks[new_id] = {
-                    'bbox': bbox,
-                    'last_seen': frame_id,
-                    'missed_frames': 0
-                }
-                
-                self.track_history[new_id] = deque(maxlen=self.sequence_length)
-                self.track_history[new_id].append(bbox)
-                
-                self.appearance_features[new_id] = appearance_feat
-                
-                print(f"新しいトラック作成: ID {new_id}")
+                    if total_cost < min_cost:
+                        min_cost = total_cost
+                        best_match_id = track_id
+                        print(f"Enhanced matching: Track {track_id}, cost={total_cost:.2f}, distance={distance:.2f}, direction_cost={direction_cost:.3f}, LSTM_cost={lstm_cost:.3f}, LSTM_confidence={lstm_confidence:.3f}")
+                else:
+                    # 従来の距離ベースマッチング
+                    if track_id in self.track_history and len(self.track_history[track_id]) > 0:
+                        old_bbox = self.track_history[track_id][-1]
+                        distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
+                        
+                        if distance < 200 and distance < min_cost:
+                            min_cost = distance
+                            best_match_id = track_id
+            
+            # 最適なマッチを見つけた場合（距離と方向を考慮）
+            if best_match_id is not None:
+                current_detections.add(best_match_id)
+                matched = True
+                self.missed_frames[best_match_id] = 0
+                self.track_history[best_match_id].append(self.preprocess_detection(bbox))
+                self.active_tracks[best_match_id] = bbox
+                # 位置履歴に追加（動きの方向も計算される）
+                self.update_position_history(best_match_id, frame_id, bbox[0], bbox[1], "detection")
+                print(f"Matched detection to track {best_match_id} with enhanced matching")
+            
+            # 既存の追跡にマッチしなかった場合、見失った魚のIDを再利用（200ピクセル以内）
+            if not matched:
+                reusable_id = self.find_reusable_id(bbox, frame_id)
+                if reusable_id is not None:
+                    # 見失った魚のIDを再利用（200ピクセル以内）
+                    current_detections.add(reusable_id)
+                    self.active_tracks[reusable_id] = bbox
+                    self.track_history[reusable_id] = deque(maxlen=self.sequence_length)
+                    self.track_history[reusable_id].append(self.preprocess_detection(bbox))
+                    self.missed_frames[reusable_id] = 0
+                    # 見失った魚リストから削除
+                    del self.lost_fish[reusable_id]
+                    # 位置履歴に追加（動きの方向も計算される）
+                    self.update_position_history(reusable_id, frame_id, bbox[0], bbox[1], "detection")
+                    print(f"Reused ID {reusable_id} for fish near position {bbox[:2]}")
+                else:
+                    # 破棄されたIDの再利用を試行
+                    result = self.find_nearest_discarded_id(bbox)
+                    if result is not None:
+                        nearest_discarded_id, distance = result
+                        # 破棄されたIDを再利用
+                        del self.discarded_ids[nearest_discarded_id]
+                        print(f"Reusing discarded ID {nearest_discarded_id} for new detection at distance {distance:.2f}")
+                        
+                        # 破棄されたIDで再作成
+                        current_detections.add(nearest_discarded_id)
+                        self.active_tracks[nearest_discarded_id] = bbox
+                        self.track_history[nearest_discarded_id] = deque(maxlen=self.sequence_length)
+                        self.track_history[nearest_discarded_id].append(self.preprocess_detection(bbox))
+                        self.missed_frames[nearest_discarded_id] = 0
+                        # 位置履歴に追加（動きの方向も計算される）
+                        self.update_position_history(nearest_discarded_id, frame_id, bbox[0], bbox[1], "detection")
+                        print(f"Reused discarded ID {nearest_discarded_id} for fish at position {bbox[:2]}")
+                    else:
+                        # 新しいIDを作成（破棄されたIDを優先的に再利用）
+                        new_id = self.get_new_id()
+                        current_detections.add(new_id)
+                        self.active_tracks[new_id] = bbox
+                        self.track_history[new_id] = deque(maxlen=self.sequence_length)
+                        self.track_history[new_id].append(self.preprocess_detection(bbox))
+                        self.missed_frames[new_id] = 0
+                        # 位置履歴に追加（動きの方向も計算される）
+                        self.update_position_history(new_id, frame_id, bbox[0], bbox[1], "detection")
+                        print(f"Created new ID {new_id} for fish at position {bbox[:2]}")
         
-        # 失われたトラックの処理
-        tracks_to_remove = []
+        # 見失った物体の処理（30フレーム以上見失った場合） 
         for track_id in list(self.active_tracks.keys()):
             if track_id not in current_detections:
-                self.active_tracks[track_id]['missed_frames'] += 1
+                self.missed_frames[track_id] = self.missed_frames.get(track_id, 0) + 1
                 
-                if self.active_tracks[track_id]['missed_frames'] > self.max_lost_frames:
-                    # トラックを失われたリストに移動
-                    self.lost_tracks[track_id] = {
-                        'last_bbox': self.active_tracks[track_id]['bbox'],
-                        'lost_frames': 0,
-                        'last_features': (
-                            self.motion_features.get(track_id),
-                            self.appearance_features.get(track_id)
-                        )
-                    }
+                
+                if self.missed_frames[track_id] > 30:  # 30フレーム以上見失った場合
+                    missed_count = self.missed_frames[track_id]
+                    self.release_id(track_id, frame_id)
+                    print(f"Lost fish ID {track_id} after {missed_count} frames")
                     
-                    tracks_to_remove.append(track_id)
-                    print(f"トラック {track_id} を失われたリストに移動")
-        
-        # 削除対象のトラックを削除
-        for track_id in tracks_to_remove:
-            del self.active_tracks[track_id]
-            if track_id in self.motion_features:
-                del self.motion_features[track_id]
-            if track_id in self.appearance_features:
-                del self.appearance_features[track_id]
-            if track_id in self.track_history:
-                del self.track_history[track_id]
-        
-        # 失われたトラックのフレーム数を更新
-        for track_id in self.lost_tracks:
-            self.lost_tracks[track_id]['lost_frames'] += 1
-            
-            # 長期間失われたトラックは削除
-            if self.lost_tracks[track_id]['lost_frames'] > self.max_lost_frames * 2:
-                del self.lost_tracks[track_id]
-    
+                    # LSTMトラッカーのクリーンアップ
+                    if self.use_lstm:
+                        self.lstm_tracker.cleanup_track(track_id)
+
     def process_video(self, video_path):
-        """動画処理メイン関数"""
         cap = cv2.VideoCapture(video_path)
         
-        # 動画設定を取得
+        # 動画の設定を取得
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         
-        # 出力設定
-        output_path = "video/lstm_reid_tracking.mp4"
+        # 出力用のVideoWriterを設定
+        output_path = "video/tracking_video_right.mp4"
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
-        frame_count = 0
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-            
+                
             # YOLOで物体検出
             results = self.yolo.track(frame, persist=True)
             
+            # YOLO検出結果を処理
+            detections = []
             if results[0].boxes is not None:
-                # トラッキング更新
-                self.update_tracking(frame_count, results[0].boxes, frame)
+                detections.extend(results[0].boxes)
+            
+            if detections:
+                # 追跡の更新
+                self.update_tracking(cap.get(cv2.CAP_PROP_POS_FRAMES), detections)
                 
-                # 現在のフレームで検出されたトラックのみを可視化
-                for detection in results[0].boxes:
-                    bbox = detection.xywh[0].cpu().numpy()
-                    x, y, w, h = bbox
-                    x1, y1 = int(x - w/2), int(y - h/2)
-                    x2, y2 = int(x + w/2), int(y + h/2)
+                # 結果の可視化
+                used_ids = set()  # このフレームで使用済みのIDを記録
+                for box in detections:
+                    # YOLO検出の可視化
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    # 物体の中心座標を計算
+                    center_x = (x1 + x2) / 2
+                    center_y = (y1 + y2) / 2
                     
-                    # 最も近いアクティブトラックのIDを探す
+                    # 最も近い追跡IDを探す（使用済みのIDは除外）
                     min_distance = float('inf')
                     closest_id = None
                     
                     for track_id, track_info in self.active_tracks.items():
-                        track_bbox = track_info['bbox']
-                        distance = np.linalg.norm(np.array([x, y]) - np.array(track_bbox[:2]))
-                        if distance < min_distance and distance < 50:  # 50ピクセル以内
+                        if track_id in used_ids:  # 使用済みのIDはスキップ
+                            continue
+                        distance = np.linalg.norm(np.array([center_x, center_y]) - track_info[:2])
+                        if distance < min_distance:
                             min_distance = distance
                             closest_id = track_id
                     
                     if closest_id is not None:
-                        # バウンディングボックスを描画
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        used_ids.add(closest_id)  # 使用したIDを記録
+                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                         cv2.putText(frame, f"ID: {closest_id}", 
-                                  (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                
-                # 失われたトラックの予測位置を表示（最大5フレームまで）
-                if self.lstm_available:
-                    for track_id, lost_info in self.lost_tracks.items():
-                        if (lost_info['lost_frames'] <= 5 and  # 最大5フレームまで表示
-                            track_id in self.track_history and 
-                            len(self.track_history[track_id]) >= self.sequence_length):
-                            lstm_output = self.predict_motion_and_features(track_id)
-                            if lstm_output is not None and lstm_output['confidence'] > 0.7:  # より高い信頼度
-                                pred_bbox = lstm_output['motion_pred']
-                                pred_x, pred_y = pred_bbox[:2]
-                                
-                                # 画面内かチェック
-                                if 0 <= pred_x < width and 0 <= pred_y < height:
-                                    # 予測位置を赤色で表示
-                                    cv2.circle(frame, (int(pred_x), int(pred_y)), 8, (0, 0, 255), 2)
-                                    cv2.putText(frame, f"Pred-{track_id}", 
-                                              (int(pred_x)+10, int(pred_y)), 
-                                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                                  (int(x1), int(y1)-10), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             
-            # フレームを出力
+            
+            # フレームを出力ファイルに書き込み
             out.write(frame)
             
-            # 表示
-            cv2.imshow("LSTM Re-ID Tracking", frame)
+            # 結果の表示
+            cv2.imshow("Tracking", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-            
-            frame_count += 1
-            
-            # 進捗表示とデバッグ情報
-            if frame_count % 100 == 0:
-                print(f"処理済みフレーム: {frame_count}")
-                print(f"  アクティブトラック数: {len(self.active_tracks)}")
-                print(f"  失われたトラック数: {len(self.lost_tracks)}")
-                if self.active_tracks:
-                    active_ids = list(self.active_tracks.keys())
-                    print(f"  アクティブID: {active_ids}")
-                if self.lost_tracks:
-                    lost_ids = list(self.lost_tracks.keys())
-                    print(f"  失われたID: {lost_ids}")
-        
+                
         cap.release()
         out.release()
         cv2.destroyAllWindows()
-        print(f"LSTM Re-IDトラッキング結果を保存しました: {output_path}")
+        print(f"Tracking result saved to {output_path}")
+
+    def collect_training_data(self, video_path, output_dir):
+        """
+        動画から教師データを自動生成
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        cap = cv2.VideoCapture(video_path)
+        frame_count = 0
+        track_data = {}  # 物体IDごとの追跡データを保存
         
-        # 統計情報を表示
-        print(f"\n=== トラッキング統計 ===")
-        print(f"総フレーム数: {frame_count}")
-        print(f"最終アクティブトラック数: {len(self.active_tracks)}")
-        print(f"失われたトラック数: {len(self.lost_tracks)}")
-        print(f"LSTM利用可能: {self.lstm_available}")
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            # YOLOで物体検出
+            results = self.yolo.track(frame, persist=True)
+            
+            if results[0].boxes is not None:
+                for box in results[0].boxes:
+                    # 物体の位置情報を取得
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    center_x = (x1 + x2) / 2
+                    center_y = (y1 + y2) / 2
+                    width = x2 - x1
+                    height = y2 - y1
+                    
+                    # 物体のIDを取得
+                    obj_id = int(box.id.item()) if box.id is not None else None
+                    
+                    if obj_id is not None:
+                        # 追跡データを保存
+                        if obj_id not in track_data:
+                            track_data[obj_id] = []
+                        
+                        track_data[obj_id].append([frame_count, center_x, center_y, width, height])
+            
+            frame_count += 1
+            
+            # 進捗表示
+            if frame_count % 100 == 0:
+                print(f"Processed {frame_count} frames")
+        
+        # 追跡データを保存
+        for obj_id, data in track_data.items():
+            if len(data) >= self.sequence_length:  # 十分なデータがある場合のみ保存
+                data_array = np.array(data)
+                output_path = os.path.join(output_dir, f"track_{obj_id}.npy")
+                np.save(output_path, data_array)
+                print(f"Saved tracking data for object {obj_id} with {len(data)} frames")
+        
+        cap.release()
+        print(f"Data collection completed. Saved {len(track_data)} object tracks.")
 
 if __name__ == "__main__":
-    # モデルパス
+    # モデルのパスを指定
     model_path = "./train_results/weights/best.pt"
-    lstm_model_path = "best_lstm_model.pth"
     
-    # トラッカー初期化
-    tracker = LSTMReIDTracker(model_path, lstm_model_path)
+    # LSTM強化トラッカーの初期化
+    tracker = ObjectTracker(
+        model_path=model_path,
+        sequence_length=10,
+        max_fish=20,
+        use_lstm=True  # LSTM機能を有効化
+    )
     
-    # 動画パス
+    # 動画のパスを指定
     video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3D_left.mp4"
     
-    print("=== LSTM Re-IDトラッキングシステム ===")
-    print(f"移動特徴重み: {tracker.motion_weight}")
-    print(f"外観特徴重み: {tracker.appearance_weight}")
-    print(f"距離閾値: {tracker.distance_threshold}")
-    print(f"LSTM利用可能: {tracker.lstm_available}")
+    print("Starting LSTM-enhanced object tracking...")
+    print(f"Using device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     
-    # 動画処理開始
-    tracker.process_video(video_path)
+    # 動画の処理開始
+    tracker.process_video(video_path) 
