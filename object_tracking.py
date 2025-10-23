@@ -309,30 +309,6 @@ class ObjectTracker:
         return reusable_id
     
     
-    def preprocess_frame_for_detection(self, frame):
-        """検出精度向上のための画像前処理"""
-        # 1. ガウシアンブラーでノイズ除去
-        blurred = cv2.GaussianBlur(frame, (3, 3), 0)
-        
-        # 2. コントラスト強化（CLAHE）
-        lab = cv2.cvtColor(blurred, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
-        enhanced = cv2.merge([l, a, b])
-        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-        
-        # 3. シャープニング（魚の輪郭を強調）
-        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-        sharpened = cv2.filter2D(enhanced, -1, kernel)
-        
-        # 4. ガンマ補正（明度調整）
-        gamma = 1.2
-        gamma_corrected = np.power(sharpened / 255.0, gamma) * 255.0
-        gamma_corrected = np.uint8(gamma_corrected)
-        
-        return gamma_corrected
-    
     def preprocess_detection(self, detection):
         # YOLOの検出結果をLSTMの入力形式に変換
         x, y, w, h = detection
@@ -378,9 +354,9 @@ class ObjectTracker:
                 else:
                     # 従来の距離ベースマッチング
                     if track_id in self.track_history and len(self.track_history[track_id]) > 0:
-                old_bbox = self.track_history[track_id][-1]
-                distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
-                
+                        old_bbox = self.track_history[track_id][-1]
+                        distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
+                        
                         if distance < 200 and distance < min_cost:
                             min_cost = distance
                             best_match_id = track_id
@@ -388,7 +364,7 @@ class ObjectTracker:
             # 最適なマッチを見つけた場合（距離と方向を考慮）
             if best_match_id is not None:
                 current_detections.add(best_match_id)
-                    matched = True
+                matched = True
                 self.missed_frames[best_match_id] = 0
                 self.track_history[best_match_id].append(self.preprocess_detection(bbox))
                 self.active_tracks[best_match_id] = bbox
@@ -431,12 +407,12 @@ class ObjectTracker:
                         print(f"Reused discarded ID {nearest_discarded_id} for fish at position {bbox[:2]}")
                     else:
                         # 新しいIDを作成（破棄されたIDを優先的に再利用）
-                new_id = self.get_new_id()
-                    current_detections.add(new_id)
-                    self.active_tracks[new_id] = bbox
-                    self.track_history[new_id] = deque(maxlen=self.sequence_length)
-                    self.track_history[new_id].append(self.preprocess_detection(bbox))
-                    self.missed_frames[new_id] = 0
+                        new_id = self.get_new_id()
+                        current_detections.add(new_id)
+                        self.active_tracks[new_id] = bbox
+                        self.track_history[new_id] = deque(maxlen=self.sequence_length)
+                        self.track_history[new_id].append(self.preprocess_detection(bbox))
+                        self.missed_frames[new_id] = 0
                         # 位置履歴に追加（動きの方向も計算される）
                         self.update_position_history(new_id, frame_id, bbox[0], bbox[1], "detection")
                         print(f"Created new ID {new_id} for fish at position {bbox[:2]}")
@@ -474,32 +450,13 @@ class ObjectTracker:
             if not ret:
                 break
                 
-            # 画像前処理による検出精度向上
-            processed_frame = self.preprocess_frame_for_detection(frame)
-                
-            # YOLOで物体検出（検出精度向上のためのパラメータ調整）
-            results = self.yolo.track(
-                processed_frame, 
-                persist=True,
-                conf=0.3,  # 信頼度閾値を下げて検出感度を向上
-                iou=0.5,   # IoU閾値を下げて重複検出を許容
-                max_det=50, # 最大検出数を増加
-                agnostic_nms=False,  # クラス別NMSを使用
-                verbose=False
-            )
+            # YOLOで物体検出
+            results = self.yolo.track(frame, persist=True)
             
-            # YOLO検出結果を処理（信頼度フィルタリング）
+            # YOLO検出結果を処理
             detections = []
             if results[0].boxes is not None:
-                boxes = results[0].boxes
-                # 信頼度でフィルタリング
-                confidences = boxes.conf.cpu().numpy()
-                valid_indices = confidences > 0.25  # より低い閾値で検出感度を向上
-                
-                if np.any(valid_indices):
-                    filtered_boxes = boxes[valid_indices]
-                    detections.extend(filtered_boxes)
-                    print(f"Frame {frame_id}: Detected {len(detections)} objects (confidence range: {confidences[valid_indices].min():.3f}-{confidences[valid_indices].max():.3f})")
+                detections.extend(results[0].boxes)
             
             if detections:
                 # 追跡の更新
@@ -601,12 +558,8 @@ class ObjectTracker:
         print(f"Data collection completed. Saved {len(track_data)} object tracks.")
 
 if __name__ == "__main__":
-    # モデルのパスを指定（より大きなモデルを試す場合は以下をコメントアウト）
+    # モデルのパスを指定
     model_path = "./train_results/weights/best.pt"
-    
-    # より大きなモデルを使用する場合（検出精度向上）
-    # model_path = "yolo11m.pt"  # 中サイズモデル
-    # model_path = "yolo11l.pt"   # 大サイズモデル（最高精度）
     
     # LSTM強化トラッカーの初期化
     tracker = ObjectTracker(
@@ -619,13 +572,8 @@ if __name__ == "__main__":
     # 動画のパスを指定
     video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3D_left.mp4"
     
-    print("Starting LSTM-enhanced object tracking with improved detection...")
+    print("Starting LSTM-enhanced object tracking...")
     print(f"Using device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
-    print(f"Model: {model_path}")
-    print("Detection improvements:")
-    print("  - Lower confidence threshold (0.3)")
-    print("  - Enhanced image preprocessing")
-    print("  - Improved parameter tuning")
     
     # 動画の処理開始
     tracker.process_video(video_path) 
