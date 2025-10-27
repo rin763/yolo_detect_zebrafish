@@ -4,10 +4,12 @@ from ultralytics import YOLO
 from collections import deque
 import os
 import torch
-from lstm_tracker import LSTMEnhancedTracker
+from lstm_kalman_tracker import LSTMKalmanTracker
+from mot_evaluator import MOTEvaluator
+import json
 
 class ObjectTracker:
-    def __init__(self, model_path, sequence_length=10, max_fish=20, use_lstm=True):
+    def __init__(self, model_path, sequence_length=10, max_fish=20, use_lstm=True, enable_evaluation=False):
         # YOLOモデルの読み込み（model_pathがNoneの場合はスキップ）
         if model_path is not None:
             self.yolo = YOLO(model_path)
@@ -18,15 +20,21 @@ class ObjectTracker:
         self.max_fish = max_fish
         self.use_lstm = use_lstm
         
-        # LSTM強化トラッカーの初期化
+        # ===== 追加: 評価機能 =====
+        self.enable_evaluation = enable_evaluation
+        if self.enable_evaluation:
+            self.evaluator = MOTEvaluator(iou_threshold=0.5, distance_threshold=50)
+            print("MOT Evaluator initialized")
+        # ==========================
+        
+        # LSTM+カルマンフィルタ強化トラッカーの初期化
         if self.use_lstm:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            self.lstm_tracker = LSTMEnhancedTracker(
+            self.lstm_kalman_tracker = LSTMKalmanTracker(
                 sequence_length=sequence_length,
-                prediction_horizon=5,
                 device=device
             )
-            print(f"LSTM tracker initialized on {device}")
+            print(f"LSTM+Kalman tracker initialized on {device}")
         
         # 物体の追跡履歴を保存
         self.track_history = {}
@@ -41,8 +49,13 @@ class ObjectTracker:
         
         # 見失った魚の情報を記憶するシステム
         self.lost_fish = {}  # {id: {'last_position': [x, y, w, h], 'lost_frames': count, 'last_seen_frame': frame_id}}
-        self.reuse_distance_threshold = 150  # ID再利用の距離閾値
-        self.max_lost_frames = 60  # IDを保持する最大フレーム数
+        self.reuse_distance_threshold = 250  # ID再利用の距離閾値
+        self.max_lost_frames = 60  # IDを保持する最大フレーム数（60から30に短縮）
+        
+        self.reuse_score_threshold = 0.15  # スコア閾値（緩い）
+        self.lstm_prediction_range = 100  # LSTM予測範囲
+        self.distance_score_weight = 0.6  # 距離の重み
+        self.lstm_score_weight = 0.4  # LSTMの重み
         
         # 破棄されたIDを記録するシステム（位置情報も含む）
         self.discarded_ids = {}  # {id: {'position': [x, y], 'discarded_frame': frame_id}}
@@ -212,21 +225,21 @@ class ObjectTracker:
                         else:
                             direction_cost = direction_diff
         
-        # LSTM予測コスト（LSTMが有効な場合）
+        # LSTM+カルマンフィルタ予測コスト（LSTMが有効な場合）
         lstm_cost = 0.0
         lstm_confidence = 0.0
         if self.use_lstm and track_id in self.position_history:
-            # LSTMトラッカーのシーケンスを更新
-            self.lstm_tracker.update_track_sequence(track_id, self.position_history[track_id])
+            # LSTM+カルマンフィルタトラッカーのシーケンスを更新
+            self.lstm_kalman_tracker.update_track_sequence(track_id, self.position_history[track_id])
             
-            # Re-IDスコアを計算
+            # ハイブリッドRe-IDスコアを計算
             detection_position = detection[:2]
-            lstm_score = self.lstm_tracker.compute_reid_score(track_id, detection_position)
-            lstm_confidence = lstm_score
+            hybrid_score = self.lstm_kalman_tracker.compute_hybrid_reid_score(track_id, detection_position)
+            lstm_confidence = hybrid_score
             
-            # スコアが低い場合はペナルティ
-            if lstm_score < self.lstm_matching_threshold:
-                lstm_cost = (self.lstm_matching_threshold - lstm_score) * 50
+            # スコアが低い場合はペナルティ（係数を下げて緩和）
+            if hybrid_score < self.lstm_matching_threshold:
+                lstm_cost = (self.lstm_matching_threshold - hybrid_score) * 20  # 50から20に減少
         
         # 総合コスト（距離、方向、LSTM予測の重み付き和）
         total_cost = (self.distance_weight * distance + 
@@ -246,11 +259,11 @@ class ObjectTracker:
                 'predicted_positions': []  # LSTM予測位置を保存
             }
             
-            # LSTM予測位置を計算（見失った魚の追跡継続）
+            # LSTM+カルマンフィルタ予測位置を計算（見失った魚の追跡継続）
             if self.use_lstm and obj_id in self.position_history:
-                predicted_positions = self.lstm_tracker.predict_lost_track_positions(obj_id, frames_ahead=10)
+                predicted_positions = self.lstm_kalman_tracker.predict_lost_track_positions(obj_id, frames_ahead=10)
                 self.lost_fish[obj_id]['predicted_positions'] = predicted_positions
-                print(f"Generated {len(predicted_positions)} predicted positions for lost fish {obj_id}")
+                print(f"Generated {len(predicted_positions)} hybrid predicted positions for lost fish {obj_id}")
             
             # 破棄されたIDとして位置情報も記録
             self.add_discarded_id(obj_id, self.active_tracks[obj_id], current_frame)
@@ -265,56 +278,71 @@ class ObjectTracker:
         #     del self.position_history[obj_id]
     
     def find_reusable_id(self, new_position, current_frame):
-        """見失った魚の中で再利用可能なIDを探す（LSTM予測も考慮）"""
+        """見失った魚の中で再利用可能なIDを探す（緩和版）"""
         reusable_id = None
         min_distance = float('inf')
-        best_lstm_score = 0.0
+        best_total_score = 0.0
         
         for fish_id, fish_info in list(self.lost_fish.items()):
-            # フレーム数が上限を超えている場合は破棄されたIDとして記録
+            # 保持期間チェック（60フレームに延長）
             if fish_info['lost_frames'] > self.max_lost_frames:
                 del self.lost_fish[fish_id]
                 self.add_discarded_id(fish_id, fish_info['last_position'], fish_info['last_seen_frame'])
                 continue
             
-            # 基本的な距離計算
+            # 距離計算
             last_pos = fish_info['last_position']
             distance = np.linalg.norm(np.array(new_position[:2]) - np.array(last_pos[:2]))
             
-            # LSTM予測位置との距離も考慮
+            # 距離スコア（緩和版：閾値を超えても除外しない）
+            if distance < self.reuse_distance_threshold:
+                distance_score = 1 - (distance / self.reuse_distance_threshold)
+            else:
+                # 閾値の2倍までは少しスコアを与える
+                distance_score = max(0, 0.3 * (1 - distance / (self.reuse_distance_threshold * 2)))
+            
+            # LSTM予測スコア
             lstm_score = 0.0
             if self.use_lstm and 'predicted_positions' in fish_info and fish_info['predicted_positions']:
-                # 予測位置との最小距離を計算
                 min_pred_distance = float('inf')
                 for pred_pos in fish_info['predicted_positions']:
                     pred_distance = np.linalg.norm(np.array(new_position[:2]) - pred_pos)
                     min_pred_distance = min(min_pred_distance, pred_distance)
                 
-                # 予測位置が近い場合はスコアを上げる
-                if min_pred_distance < 50:  # 50ピクセル以内
-                    lstm_score = max(0, 1 - min_pred_distance / 50)
+                # LSTM予測範囲を拡大（50 → 100）
+                if min_pred_distance < self.lstm_prediction_range:
+                    lstm_score = max(0, 1 - min_pred_distance / self.lstm_prediction_range)
             
-            # 総合スコアを計算（距離とLSTM予測の重み付き）
-            total_score = 0.7 * (1 - min(distance / self.reuse_distance_threshold, 1.0)) + 0.3 * lstm_score
+            # 総合スコア（重み調整）
+            total_score = (self.distance_score_weight * distance_score + 
+                        self.lstm_score_weight * lstm_score)
             
-            # 最も良いスコアのIDを選択
-            if total_score > 0.5 and (reusable_id is None or total_score > best_lstm_score):
-                min_distance = distance
-                reusable_id = fish_id
-                best_lstm_score = total_score
+            # 閾値判定（0.3 → 0.15に緩和）
+            if total_score > self.reuse_score_threshold:
+                if reusable_id is None or total_score > best_total_score:
+                    min_distance = distance
+                    reusable_id = fish_id
+                    best_total_score = total_score
         
         if reusable_id is not None:
-            print(f"Found reusable ID {reusable_id} with distance {min_distance:.2f} and LSTM score {best_lstm_score:.3f}")
+            print(f"Found reusable ID {reusable_id} with distance {min_distance:.2f} and score {best_total_score:.3f}")
         
         return reusable_id
-    
     
     def preprocess_detection(self, detection):
         # YOLOの検出結果をLSTMの入力形式に変換
         x, y, w, h = detection
         return np.array([x, y, w, h])
     
-    def update_tracking(self, frame_id, detections):
+    def update_tracking(self, frame_id, detections, ground_truth=None):
+        """
+        追跡を更新（既存のロジックは変更なし、評価機能のみ追加）
+        
+        Args:
+            frame_id: フレームID
+            detections: YOLO検出結果
+            ground_truth: Ground Truthデータ（評価用、オプション）
+        """
         # 見失った魚のフレーム数を更新（30フレーム以上見失った場合）
         for fish_id in self.lost_fish:
             self.lost_fish[fish_id]['lost_frames'] += 1
@@ -356,13 +384,13 @@ class ObjectTracker:
                     if track_id in self.track_history and len(self.track_history[track_id]) > 0:
                         old_bbox = self.track_history[track_id][-1]
                         distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
-                        
+                
                         if distance < 200 and distance < min_cost:
                             min_cost = distance
                             best_match_id = track_id
             
-            # 最適なマッチを見つけた場合（距離と方向を考慮）
-            if best_match_id is not None:
+            # 最適なマッチを見つけた場合（距離と方向を考慮、コストが閾値以内の場合のみ）
+            if best_match_id is not None and min_cost < 150:  # コスト閾値を追加
                 current_detections.add(best_match_id)
                 matched = True
                 self.missed_frames[best_match_id] = 0
@@ -370,7 +398,9 @@ class ObjectTracker:
                 self.active_tracks[best_match_id] = bbox
                 # 位置履歴に追加（動きの方向も計算される）
                 self.update_position_history(best_match_id, frame_id, bbox[0], bbox[1], "detection")
-                print(f"Matched detection to track {best_match_id} with enhanced matching")
+                print(f"Matched detection to track {best_match_id} with enhanced matching (cost: {min_cost:.2f})")
+            elif best_match_id is not None:
+                print(f"Match found but cost too high: {min_cost:.2f}, skipping match")
             
             # 既存の追跡にマッチしなかった場合、見失った魚のIDを再利用（200ピクセル以内）
             if not matched:
@@ -428,11 +458,68 @@ class ObjectTracker:
                     self.release_id(track_id, frame_id)
                     print(f"Lost fish ID {track_id} after {missed_count} frames")
                     
-                    # LSTMトラッカーのクリーンアップ
+                    # LSTM+カルマンフィルタトラッカーのクリーンアップ
                     if self.use_lstm:
-                        self.lstm_tracker.cleanup_track(track_id)
+                        self.lstm_kalman_tracker.cleanup_track(track_id)
+        
+        # ===== 追加: 評価機能 =====
+        # Ground Truthがある場合、評価器を更新
+        if self.enable_evaluation and ground_truth is not None:
+            # 現在のトラッキング結果を評価フォーマットに変換
+            predictions = {}
+            for track_id, bbox in self.active_tracks.items():
+                # bbox形式: [x_center, y_center, width, height]
+                predictions[track_id] = [bbox[0], bbox[1], bbox[2], bbox[3]]
+            
+            # 評価器を更新
+            self.evaluator.update_frame(ground_truth, predictions)
+        # ==========================
 
-    def process_video(self, video_path):
+    # ===== 追加: Ground Truth読み込み関数 =====
+    def load_ground_truth(self, gt_path, frame_id):
+        """
+        MOTChallenge形式のGround Truthを読み込み
+        形式: frame, id, x, y, w, h, conf, -1, -1, -1
+        
+        Args:
+            gt_path: Ground Truthファイルのパス
+            frame_id: 現在のフレームID
+            
+        Returns:
+            dict: {obj_id: [x_center, y_center, width, height]}
+        """
+        gt_data = {}
+        
+        if not os.path.exists(gt_path):
+            return None
+        
+        try:
+            with open(gt_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split(',')
+                    if len(parts) < 6:
+                        continue
+                    
+                    if int(parts[0]) == frame_id:
+                        obj_id = int(parts[1])
+                        x, y, w, h = map(float, parts[2:6])
+                        # 左上角座標から中心座標に変換
+                        gt_data[obj_id] = [x + w/2, y + h/2, w, h]
+        except Exception as e:
+            print(f"Error loading ground truth: {e}")
+            return None
+        
+        return gt_data if gt_data else None
+    # ==========================================
+
+    def process_video(self, video_path, ground_truth_path=None):
+        """
+        動画を処理（既存のロジックは変更なし、評価機能のみ追加）
+        
+        Args:
+            video_path: 入力動画のパス
+            ground_truth_path: Ground Truthファイルのパス（オプション）
+        """
         cap = cv2.VideoCapture(video_path)
         
         # 動画の設定を取得
@@ -445,10 +532,14 @@ class ObjectTracker:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
         
+        frame_count = 0
+        
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            frame_count += 1
                 
             # YOLOで物体検出
             results = self.yolo.track(frame, persist=True)
@@ -458,9 +549,15 @@ class ObjectTracker:
             if results[0].boxes is not None:
                 detections.extend(results[0].boxes)
             
+            # ===== 追加: Ground Truth読み込み =====
+            ground_truth = None
+            if self.enable_evaluation and ground_truth_path is not None:
+                ground_truth = self.load_ground_truth(ground_truth_path, frame_count)
+            # ======================================
+            
             if detections:
-                # 追跡の更新
-                self.update_tracking(cap.get(cv2.CAP_PROP_POS_FRAMES), detections)
+                # 追跡の更新（Ground Truthも渡す）
+                self.update_tracking(frame_count, detections, ground_truth)
                 
                 # 結果の可視化
                 used_ids = set()  # このフレームで使用済みのIDを記録
@@ -490,6 +587,19 @@ class ObjectTracker:
                                   (int(x1), int(y1)-10), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
             
+            # ===== 追加: 評価情報を画面に表示 =====
+            if self.enable_evaluation:
+                summary = self.evaluator.get_summary()
+                # フレーム情報
+                cv2.putText(frame, f"Frame: {frame_count}", (10, 30), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                # ID切り替わり回数
+                cv2.putText(frame, f"ID Switches: {summary['ID_Switches']}", (10, 60), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                # アクティブなトラック数
+                cv2.putText(frame, f"Active Tracks: {len(self.active_tracks)}", (10, 90), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            # =========================================
             
             # フレームを出力ファイルに書き込み
             out.write(frame)
@@ -503,6 +613,25 @@ class ObjectTracker:
         out.release()
         cv2.destroyAllWindows()
         print(f"Tracking result saved to {output_path}")
+        
+        # ===== 追加: 評価結果の表示と保存 =====
+        if self.enable_evaluation:
+            print("\n" + "="*60)
+            print("MOT Evaluation Results")
+            print("="*60)
+            summary = self.evaluator.print_summary()
+            
+            # JSONファイルとして保存
+            result_dir = os.path.dirname(output_path)
+            if not result_dir:
+                result_dir = "."
+            json_path = os.path.join(result_dir, "evaluation_results.json")
+            self.evaluator.save_results(json_path)
+            
+            return summary
+        # ======================================
+        
+        return None
 
     def collect_training_data(self, video_path, output_dir):
         """
@@ -557,23 +686,63 @@ class ObjectTracker:
         cap.release()
         print(f"Data collection completed. Saved {len(track_data)} object tracks.")
 
+
 if __name__ == "__main__":
     # モデルのパスを指定
-    model_path = "./train_results/weights/best.pt"
+    model_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/train_results/weights/best.pt"
+    
+    # 動画のパスを指定
+    video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3min_3D_left.mp4"
+    
+    # Ground Truthのパス（ある場合は指定、ない場合はNone）
+    ground_truth_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth.py"
+    
+    # ===== 評価モードの設定 =====
+    # Ground Truthがある場合は評価モードを有効化
+    enable_evaluation = (ground_truth_path is not None)
+    # ===========================
     
     # LSTM強化トラッカーの初期化
     tracker = ObjectTracker(
         model_path=model_path,
         sequence_length=10,
         max_fish=20,
-        use_lstm=True  # LSTM機能を有効化
+        use_lstm=True,  # LSTM機能を有効化
+        enable_evaluation=enable_evaluation  # 評価機能を有効化
     )
     
-    # 動画のパスを指定
-    video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3D_left.mp4"
-    
-    print("Starting LSTM-enhanced object tracking...")
+    print("Starting LSTM+Kalman Filter enhanced object tracking...")
     print(f"Using device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+    print("Hybrid prediction features:")
+    print("  - LSTM neural network for pattern learning")
+    print("  - Kalman filter for motion prediction")
+    print("  - Hybrid Re-ID scoring system")
+    print("  - Enhanced lost fish tracking")
+    
+    if enable_evaluation:
+        print("\n=== MOT Evaluation Mode Enabled ===")
+        print("Evaluation metrics will be calculated:")
+        print("  - MOTA (Multiple Object Tracking Accuracy)")
+        print("  - MOTP (Multiple Object Tracking Precision)")
+        print("  - IDF1 (ID F1 Score)")
+        print("  - ID Switches")
+        print("  - Fragmentations")
     
     # 動画の処理開始
-    tracker.process_video(video_path) 
+    evaluation_results = tracker.process_video(
+        video_path,
+        ground_truth_path=ground_truth_path
+    )
+    
+    # ===== 評価結果の表示 =====
+    if evaluation_results:
+        print("\n" + "="*60)
+        print("Final Evaluation Summary")
+        print("="*60)
+        print(f"MOTA: {evaluation_results['MOTA']:.4f}")
+        print(f"MOTP: {evaluation_results['MOTP']:.2f} pixels")
+        print(f"IDF1: {evaluation_results['IDF1']:.4f}")
+        print(f"ID Switches: {evaluation_results['ID_Switches']}")
+        print(f"Fragmentations: {evaluation_results['Fragmentations']}")
+        print("="*60)
+    # ==========================

@@ -1,3 +1,4 @@
+# 以下はlstm_kalman_tracker.pyのコードです。
 import numpy as np
 import torch
 import torch.nn as nn
