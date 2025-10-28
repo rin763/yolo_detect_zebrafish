@@ -169,10 +169,37 @@ class MOTEvaluator:
         """
         self.current_frame += 1
         
+        # デバッグ情報（最初の数フレームのみ表示）
+        if self.current_frame <= 3:
+            print(f"\n🔍 Debug Frame {self.current_frame}:")
+            print(f"   GT objects: {len(ground_truth)} - IDs: {list(ground_truth.keys())[:5]}")
+            print(f"   Predictions: {len(predictions)} - IDs: {list(predictions.keys())[:5]}")
+            if ground_truth:
+                gt_sample_id = list(ground_truth.keys())[0]
+                print(f"   Sample GT bbox: ID {gt_sample_id} = {ground_truth[gt_sample_id]}")
+            if predictions:
+                pred_sample_id = list(predictions.keys())[0]
+                print(f"   Sample Pred bbox: ID {pred_sample_id} = {predictions[pred_sample_id]}")
+        
         # マッチングを実行
         matches, unmatched_gt, unmatched_pred = self.match_detections(
             ground_truth, predictions
         )
+        
+        # マッチング結果をデバッグ（最初の数フレームのみ）
+        if self.current_frame <= 3:
+            print(f"   Matches: {len(matches)}")
+            if matches:
+                print(f"   Sample matches: {list(matches.items())[:3]}")
+            print(f"   Unmatched GT: {len(unmatched_gt)}, Unmatched Pred: {len(unmatched_pred)}")
+            print(f"   IoU threshold: {self.iou_threshold}, Distance threshold: {self.distance_threshold}")
+        
+        # マッチングが0の場合の警告
+        if len(matches) == 0 and len(ground_truth) > 0 and len(predictions) > 0:
+            if self.current_frame % 100 == 1:  # 100フレームごとに1回だけ表示
+                print(f"⚠️ Frame {self.current_frame}: No matches! GT={len(ground_truth)}, Pred={len(predictions)}")
+                print(f"   This may cause IDF1=0. Check IoU threshold ({self.iou_threshold}) or distance threshold ({self.distance_threshold})")
+        
         
         # メトリクスを更新
         self.frame_metrics['true_positives'] += len(matches)
@@ -264,6 +291,14 @@ class MOTEvaluator:
         total_idfp = 0  # ID False Positives
         total_idfn = 0  # ID False Negatives
         
+        # デバッグ: track_gt_matchesの状態を確認
+        if len(self.track_gt_matches) == 0:
+            print("\n⚠️ IDF1 Calculation Debug:")
+            print(f"   track_gt_matches is EMPTY!")
+            print(f"   track_lengths: {len(self.track_lengths)} tracks")
+            print(f"   This means no GT-Pred matches were recorded.")
+            print(f"   Check if update_frame() is being called with valid data.")
+        
         for pred_id, gt_ids in self.track_gt_matches.items():
             if len(gt_ids) == 0:
                 continue
@@ -279,16 +314,34 @@ class MOTEvaluator:
         # 見逃されたフレーム
         total_idfn = self.frame_metrics['false_negatives']
         
+        # デバッグ情報を表示
+        print(f"\n📊 IDF1 Calculation:")
+        print(f"   IDTP (ID True Positives): {total_idtp}")
+        print(f"   IDFP (ID False Positives): {total_idfp}")
+        print(f"   IDFN (ID False Negatives): {total_idfn}")
+        print(f"   Unique Pred Tracks: {len(self.track_gt_matches)}")
+        print(f"   Total Track Lengths: {sum(self.track_lengths.values())}")
+        
         if (total_idtp + total_idfp) == 0 or (total_idtp + total_idfn) == 0:
+            print(f"   ⚠️ IDF1 = 0 because denominator is 0")
+            if (total_idtp + total_idfp) == 0:
+                print(f"      No ID matches found (IDTP + IDFP = 0)")
+            if (total_idtp + total_idfn) == 0:
+                print(f"      No GT objects (IDTP + IDFN = 0)")
             return 0.0
         
         precision = total_idtp / (total_idtp + total_idfp)
         recall = total_idtp / (total_idtp + total_idfn)
         
+        print(f"   ID Precision: {precision:.4f}")
+        print(f"   ID Recall: {recall:.4f}")
+        
         if precision + recall == 0:
+            print(f"   ⚠️ IDF1 = 0 because precision + recall = 0")
             return 0.0
         
         idf1 = 2 * precision * recall / (precision + recall)
+        print(f"   IDF1: {idf1:.4f}")
         return idf1
     
     def get_summary(self):

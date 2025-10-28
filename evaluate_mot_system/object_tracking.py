@@ -98,8 +98,9 @@ class ObjectTracker:
         self.position_history[track_id].append((frame_id, x, y, source, direction_rad))
         
         # 履歴が長すぎる場合は古いものを削除（メモリ節約）
-        if len(self.position_history[track_id]) > 1000:  # 最大1000フレーム分保持
-            self.position_history[track_id] = self.position_history[track_id][-500:]  # 最新500フレーム分のみ保持
+        # 評価用にサイズ制限を無効化
+        # if len(self.position_history[track_id]) > 1000:  # 最大1000フレーム分保持
+        #     self.position_history[track_id] = self.position_history[track_id][-500:]  # 最新500フレーム分のみ保持
     
         
     def get_new_id(self):
@@ -471,8 +472,15 @@ class ObjectTracker:
                 # bbox形式: [x_center, y_center, width, height]
                 predictions[track_id] = [bbox[0], bbox[1], bbox[2], bbox[3]]
             
+            # デバッグ情報
+            if frame_id % 100 == 0:  # 100フレームごとに表示
+                print(f"📊 Frame {frame_id}: GT objects={len(ground_truth)}, Predictions={len(predictions)}")
+            
             # 評価器を更新
             self.evaluator.update_frame(ground_truth, predictions)
+        elif self.enable_evaluation and ground_truth is None:
+            if frame_id % 100 == 0:
+                print(f"⚠️ Frame {frame_id}: No Ground Truth data available")
         # ==========================
 
     # ===== 追加: Ground Truth読み込み関数 =====
@@ -491,22 +499,36 @@ class ObjectTracker:
         gt_data = {}
         
         if not os.path.exists(gt_path):
+            print(f"⚠️ Ground Truth file not found: {gt_path}")
             return None
         
         try:
             with open(gt_path, 'r') as f:
-                for line in f:
+                lines = f.readlines()
+                if not lines:
+                    print(f"⚠️ Ground Truth file is empty: {gt_path}")
+                    return None
+                
+                for line in lines:
                     parts = line.strip().split(',')
                     if len(parts) < 6:
                         continue
                     
-                    if int(parts[0]) == frame_id:
-                        obj_id = int(parts[1])
-                        x, y, w, h = map(float, parts[2:6])
-                        # 左上角座標から中心座標に変換
-                        gt_data[obj_id] = [x + w/2, y + h/2, w, h]
+                    try:
+                        frame_num = int(parts[0])
+                        if frame_num == frame_id:
+                            obj_id = int(parts[1])
+                            x, y, w, h = map(float, parts[2:6])
+                            # 左上角座標から中心座標に変換
+                            gt_data[obj_id] = [x + w/2, y + h/2, w, h]
+                    except ValueError as ve:
+                        print(f"⚠️ Invalid data format in line: {line.strip()}")
+                        continue
+                        
         except Exception as e:
-            print(f"Error loading ground truth: {e}")
+            print(f"❌ Error loading ground truth: {e}")
+            import traceback
+            traceback.print_exc()
             return None
         
         return gt_data if gt_data else None
@@ -520,6 +542,41 @@ class ObjectTracker:
             video_path: 入力動画のパス
             ground_truth_path: Ground Truthファイルのパス（オプション）
         """
+        # ===== 評価設定の確認 =====
+        print("\n" + "="*60)
+        print("🎬 Video Processing & Tracking")
+        print("="*60)
+        print(f"📹 Video: {video_path}")
+        print(f"🔧 LSTM Enabled: {self.use_lstm}")
+        print(f"📊 Evaluation Enabled: {self.enable_evaluation}")
+        
+        if self.enable_evaluation:
+            if ground_truth_path:
+                if os.path.exists(ground_truth_path):
+                    print(f"✅ Ground Truth: {ground_truth_path}")
+                    # Ground Truthファイルの内容をチェック
+                    try:
+                        with open(ground_truth_path, 'r') as f:
+                            lines = f.readlines()
+                            print(f"   Total lines in GT file: {len(lines)}")
+                            if lines:
+                                # 最初と最後のフレームIDを表示
+                                first_frame = int(lines[0].strip().split(',')[0])
+                                last_frame = int(lines[-1].strip().split(',')[0])
+                                print(f"   Frame range: {first_frame} - {last_frame}")
+                    except Exception as e:
+                        print(f"⚠️ Error reading GT file: {e}")
+                else:
+                    print(f"❌ Ground Truth file not found: {ground_truth_path}")
+                    print("   Evaluation will be disabled!")
+                    self.enable_evaluation = False
+            else:
+                print("❌ No Ground Truth path provided")
+                print("   Evaluation will be disabled!")
+                self.enable_evaluation = False
+        print("="*60 + "\n")
+        # ==========================
+        
         cap = cv2.VideoCapture(video_path)
         
         # 動画の設定を取得
@@ -582,10 +639,12 @@ class ObjectTracker:
                     
                     if closest_id is not None:
                         used_ids.add(closest_id)  # 使用したIDを記録
+                        # BBoxを緑色で表示
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                        cv2.putText(frame, f"ID: {closest_id}", 
+                        # IDを青色で表示
+                        cv2.putText(frame, f"{closest_id}", 
                                   (int(x1), int(y1)-10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
             
             # ===== 追加: 評価情報を画面に表示 =====
             if self.enable_evaluation:
@@ -694,12 +753,19 @@ if __name__ == "__main__":
     # 動画のパスを指定
     video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3min_3D_left.mp4"
     
-    # Ground Truthのパス（ある場合は指定、ない場合はNone）
-    ground_truth_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth.py"
+    # Ground Truthのパス（MOTChallenge形式の.txtファイル）
+    # 例: "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt"
+    # ground_truth.pyはGround Truth生成ツールで、Ground Truthデータファイルではありません
+    ground_truth_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt"
     
     # ===== 評価モードの設定 =====
-    # Ground Truthがある場合は評価モードを有効化
-    enable_evaluation = (ground_truth_path is not None)
+    # Ground Truthファイルが存在する場合のみ評価モードを有効化
+    enable_evaluation = ground_truth_path is not None and os.path.exists(ground_truth_path)
+    
+    if not enable_evaluation and ground_truth_path:
+        print(f"\n⚠️ WARNING: Ground Truth file not found: {ground_truth_path}")
+        print("   Evaluation mode will be disabled.")
+        print("   Please generate Ground Truth using ground_truth.py first.\n")
     # ===========================
     
     # LSTM強化トラッカーの初期化

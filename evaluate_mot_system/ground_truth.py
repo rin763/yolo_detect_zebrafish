@@ -43,6 +43,11 @@ class GroundTruthGenerator:
         self.paused = True
         self.selected_box = None
         
+        # マウスクリック時の位置
+        self.mouse_x = None
+        self.mouse_y = None
+        self.mouse_clicked = False
+        
     def method1_semi_automatic(self, video_path, output_path, review_interval=30):
         """
         方法1: 半自動生成
@@ -60,17 +65,31 @@ class GroundTruthGenerator:
         """
         print("\n=== 方法1: 半自動Ground Truth生成（ObjectTracker使用）===")
         print("操作方法:")
+        print("  マウス: ボックスをクリックして選択")
+        print("  A: 現在の位置に新規物体を追加")
+        print("  D: 選択した物体を削除")
+        print("  0-9: 選択したボックスのIDを変更")
         print("  SPACE: 一時停止/再生")
-        print("  →: 次のフレーム")
-        print("  ←: 前のフレーム")
-        print("  数字キー: 選択したボックスのIDを変更")
+        print("  →/N: 次のフレーム")
+        print("  ←/P: 前のフレーム")
         print("  S: 現在の状態を保存")
         print("  Q: 終了")
-        print("\nマウスでボックスをクリックして選択できます")
         
         cap = cv2.VideoCapture(video_path)
         frame_count = 0
         temp_detections = []  # 一時的な検出結果を保存
+        manual_detections = {}  # {frame: [(track_id, bbox), ...]}
+        
+        # マウスイベントハンドラー
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.mouse_x = x
+                self.mouse_y = y
+                self.mouse_clicked = True
+                print(f"マウスクリック: ({x}, {y})")
+        
+        cv2.namedWindow("Ground Truth Generator")
+        cv2.setMouseCallback("Ground Truth Generator", mouse_callback)
         
         while cap.isOpened():
             if not self.paused:
@@ -100,14 +119,18 @@ class GroundTruthGenerator:
             
             # ObjectTrackerのactive_tracksを使用
             for track_id, bbox in self.tracker.active_tracks.items():
+                # 修正されたIDがあればそれを使用
+                display_id = self.id_corrections.get((frame_count, track_id), track_id)
+                
+                # 削除マーク（None）が付いている場合は描画しない
+                if display_id is None:
+                    continue
+                
                 x, y, w, h = bbox
                 x1 = x - w/2
                 y1 = y - h/2
                 x2 = x + w/2
                 y2 = y + h/2
-                
-                # 修正されたIDがあればそれを使用
-                display_id = self.id_corrections.get((frame_count, track_id), track_id)
                 
                 boxes_info.append({
                     'yolo_id': track_id,
@@ -117,11 +140,38 @@ class GroundTruthGenerator:
                 })
                 
                 # ボックスとIDを描画
-                color = (0, 255, 0) if self.selected_box != track_id else (0, 0, 255)
-                cv2.rectangle(display_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                cv2.putText(display_frame, f"ID: {display_id}", 
+                # BBoxを緑色で表示（選択時は赤色）
+                box_color = (0, 0, 255) if self.selected_box == track_id else (0, 255, 0)
+                cv2.rectangle(display_frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+                # IDを青色で表示
+                cv2.putText(display_frame, f"{display_id}", 
                           (int(x1), int(y1)-10),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
+            
+            # マニュアルで追加された物体を描画
+            if frame_count in manual_detections:
+                for manual_track_id, manual_bbox in manual_detections[frame_count]:
+                    x, y, w, h = manual_bbox
+                    x1 = int(x - w/2)
+                    y1 = int(y - h/2)
+                    x2 = int(x + w/2)
+                    y2 = int(y + h/2)
+                    
+                    display_id = manual_track_id
+                    boxes_info.append({
+                        'yolo_id': manual_track_id,
+                        'display_id': display_id,
+                        'bbox': (x1, y1, x2, y2),
+                        'frame': frame_count
+                    })
+                    
+                    # BBoxを緑色で表示（選択時は赤色）
+                    box_color = (0, 0, 255) if self.selected_box == manual_track_id else (0, 255, 0)
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, 2)
+                    # IDを青色で表示
+                    cv2.putText(display_frame, f"{display_id}", 
+                              (x1, y1-10),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
             
             # 情報表示
             cv2.putText(display_frame, f"Frame: {frame_count}", (10, 30),
@@ -141,6 +191,46 @@ class GroundTruthGenerator:
                 print(f"\n--- Frame {frame_count} でレビュー ---")
                 print(f"検出数: {len(boxes_info)}")
             
+            # マウスクリックでボックスを選択
+            if self.mouse_clicked:
+                closest_box = None
+                min_distance = float('inf')
+                
+                # 既存のボックスをチェック
+                for track_id, bbox in self.tracker.active_tracks.items():
+                    x, y, w, h = bbox
+                    x1 = x - w/2
+                    y1 = y - h/2
+                    x2 = x + w/2
+                    y2 = y + h/2
+                    
+                    if (x1 <= self.mouse_x <= x2) and (y1 <= self.mouse_y <= y2):
+                        distance = np.sqrt((self.mouse_x - x)**2 + (self.mouse_y - y)**2)
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_box = track_id
+                
+                # マニュアル追加されたボックスをチェック
+                if frame_count in manual_detections:
+                    for manual_track_id, manual_bbox in manual_detections[frame_count]:
+                        x, y, w, h = manual_bbox
+                        x1 = x - w/2
+                        y1 = y - h/2
+                        x2 = x + w/2
+                        y2 = y + h/2
+                        
+                        if (x1 <= self.mouse_x <= x2) and (y1 <= self.mouse_y <= y2):
+                            distance = np.sqrt((self.mouse_x - x)**2 + (self.mouse_y - y)**2)
+                            if distance < min_distance:
+                                min_distance = distance
+                                closest_box = manual_track_id
+                
+                if closest_box is not None:
+                    self.selected_box = closest_box
+                    print(f"ボックスを選択: {closest_box}")
+                
+                self.mouse_clicked = False
+            
             # キー入力処理
             key = cv2.waitKey(1 if not self.paused else 0) & 0xFF
             
@@ -151,6 +241,39 @@ class GroundTruthGenerator:
             elif key == ord('s'):
                 self._save_ground_truth(temp_detections, output_path)
                 print(f"保存しました: {output_path}")
+            elif key == ord('a'):
+                # 新しい物体を追加（マウスクリックした位置に）
+                if self.mouse_x is not None and self.mouse_y is not None:
+                    if frame_count not in manual_detections:
+                        manual_detections[frame_count] = []
+                    
+                    new_track_id = max([t for t in self.tracker.active_tracks.keys()] + 
+                                      [t for t in (manual_detections.get(frame_count, []))] +
+                                      [0]) + 1
+                    
+                    # デフォルトサイズのbboxを作成
+                    default_w = 50
+                    default_h = 50
+                    new_bbox = [self.mouse_x, self.mouse_y, default_w, default_h]
+                    manual_detections[frame_count].append((new_track_id, new_bbox))
+                    self.selected_box = new_track_id
+                    print(f"新しい物体を追加: ID {new_track_id} at ({self.mouse_x}, {self.mouse_y})")
+            elif key == ord('d'):
+                # 選択した物体を削除
+                if self.selected_box is not None:
+                    # マニュアル追加された物体を削除
+                    if frame_count in manual_detections:
+                        manual_detections[frame_count] = [(t, b) for t, b in manual_detections[frame_count] 
+                                                         if t != self.selected_box]
+                        print(f"マニュアル物体 {self.selected_box} を削除")
+                    
+                    # ObjectTrackerのトラックを一時的に無効化
+                    # 現在のフレームでのマッチングをスキップするために
+                    # id_correctionsを使って削除マークを付ける
+                    self.id_corrections[(frame_count, self.selected_box)] = None  # Noneは削除を意味する
+                    print(f"トラック {self.selected_box} をフレーム {frame_count} から削除")
+                    
+                    self.selected_box = None
             elif key == ord('n') or key == 83:  # 右矢印
                 frame_count += 1
                 self.paused = True
@@ -161,8 +284,18 @@ class GroundTruthGenerator:
                 # 数字キーでIDを変更
                 new_id = key - ord('0')
                 if self.selected_box is not None:
-                    self.id_corrections[(frame_count, self.selected_box)] = new_id
-                    print(f"ID {self.selected_box} を {new_id} に変更")
+                    if frame_count in manual_detections:
+                        # マニュアル追加された物体の場合
+                        for i, (track_id, bbox) in enumerate(manual_detections[frame_count]):
+                            if track_id == self.selected_box:
+                                manual_detections[frame_count][i] = (new_id, bbox)
+                                print(f"ID {self.selected_box} を {new_id} に変更")
+                                self.selected_box = new_id
+                                break
+                    else:
+                        # ObjectTrackerの物体の場合
+                        self.id_corrections[(frame_count, self.selected_box)] = new_id
+                        print(f"ID {self.selected_box} を {new_id} に変更")
             
             # 検出結果を一時保存
             temp_detections.append({
@@ -313,6 +446,10 @@ class GroundTruthGenerator:
                     box_info['display_id']
                 )
                 
+                # 削除マーク（None）が付いている場合は保存しない
+                if obj_id is None:
+                    continue
+                
                 all_data.append({
                     'frame': frame_num,
                     'id': obj_id,
@@ -349,28 +486,28 @@ if __name__ == "__main__":
     
     gt_path = generator.method1_semi_automatic(
         video_path=video_path,
-        output_path="ground_truth/semi_auto.txt",
+        output_path="/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt",
         review_interval=30  # 30フレームごとに確認
     )
     
-    # ========================================
-    # 使用例2: 完全自動生成（比較用）
-    # ========================================
-    print("\n方法2: 完全自動生成（別の設定との比較用）")
+    # # ========================================
+    # # 使用例2: 完全自動生成（比較用）
+    # # ========================================
+    # print("\n方法2: 完全自動生成（別の設定との比較用）")
     
-    baseline_gt = generator.method2_full_automatic(
-        video_path=video_path,
-        output_path="ground_truth/baseline.txt",
-        confidence_threshold=0.5
-    )
+    # baseline_gt = generator.method2_full_automatic(
+    #     video_path=video_path,
+    #     output_path="/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/baseline.txt",
+    #     confidence_threshold=0.5
+    # )
     
-    # ========================================
-    # 使用例3: サンプリング（長時間動画用）
-    # ========================================
-    print("\n方法3: サンプリング生成（長時間動画向け）")
+    # # ========================================
+    # # 使用例3: サンプリング（長時間動画用）
+    # # ========================================
+    # print("\n方法3: サンプリング生成（長時間動画向け）")
     
-    sample_dir = generator.method3_sampling(
-        video_path=video_path,
-        output_dir="ground_truth/samples",
-        sample_interval=30  # 30フレーム = 1秒ごと（30fps想定）
-    )
+    # sample_dir = generator.method3_sampling(
+    #     video_path=video_path,
+    #     output_dir="/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/samples",
+    #     sample_interval=30  # 30フレーム = 1秒ごと（30fps想定）
+    # )
