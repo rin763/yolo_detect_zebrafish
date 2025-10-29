@@ -39,25 +39,25 @@ class ObjectTracker:
         self.position_history = {}
         
         # 改善されたID管理システム
-        # IDは1〜max_fishの範囲で割り当て（next_idは不要）
+        self.next_id = 1
         self.active_tracks = {}
         self.missed_frames = {}
         
         # ===== 改善1: 見失った魚の管理を緩和 =====
         self.lost_fish = {}
-        self.reuse_distance_threshold = 300  # 250 → 300に拡大
-        self.max_lost_frames = 90  # 60 → 90に延長
+        self.reuse_distance_threshold = 400  # 300 → 400に拡大（より遠くても再検出）
+        self.max_lost_frames = 120  # 90 → 120に延長（より長く記憶）
         
         # ===== 改善2: マッチングスコアの閾値を大幅緩和 =====
-        self.reuse_score_threshold = 0.05  # 0.15 → 0.05に大幅緩和
-        self.lstm_prediction_range = 150  # 100 → 150に拡大
-        self.distance_score_weight = 0.7  # 0.6 → 0.7に増加（距離を重視）
-        self.lstm_score_weight = 0.3  # 0.4 → 0.3に減少（LSTMの影響を減らす）
+        self.reuse_score_threshold = 0.02
+        self.lstm_prediction_range = 200
+        self.distance_score_weight = 0.7
+        self.lstm_score_weight = 0.3
         
         # 破棄されたIDを記録するシステム
         self.discarded_ids = {}
-        self.max_discarded_ids = 30  # 20 → 30に増加
-        self.discarded_id_reuse_distance = 150  # 100 → 150に拡大
+        self.max_discarded_ids = 10
+        self.discarded_id_reuse_distance = 200  # 150 → 200に拡大
         
         # ===== 改善3: マッチングパラメータの調整 =====
         self.use_direction_matching = True
@@ -95,33 +95,16 @@ class ObjectTracker:
     
         
     def get_new_id(self):
-        """
-        新しいIDを取得（1〜max_fishの範囲内で制限）
-        破棄されたIDを優先的に再利用し、なければ未使用のIDを探す
-        """
-        # 破棄されたIDの中から範囲内のものを再利用
+        """新しいIDを取得（破棄されたIDを優先的に再利用）"""
         if self.discarded_ids:
-            # 範囲内（1〜max_fish）の破棄されたIDを探す
-            valid_discarded = [id for id in self.discarded_ids.keys() if 1 <= id <= self.max_fish]
-            if valid_discarded:
-                reused_id = min(valid_discarded)
-                del self.discarded_ids[reused_id]
-                print(f"♻️ Reusing discarded ID: {reused_id}")
-                return reused_id
+            reused_id = min(self.discarded_ids.keys())
+            del self.discarded_ids[reused_id]
+            print(f"Reusing discarded ID: {reused_id}")
+            return reused_id
         
-        # 現在使用中のIDを取得
-        used_ids = set(self.active_tracks.keys()) | set(self.lost_fish.keys())
-        
-        # 1〜max_fishの範囲で未使用のIDを探す
-        for candidate_id in range(1, self.max_fish + 1):
-            if candidate_id not in used_ids:
-                print(f"✨ Assigned new ID: {candidate_id} (range: 1-{self.max_fish})")
-                return candidate_id
-        
-        # すべてのIDが使用中の場合
-        print(f"⚠️ WARNING: All IDs (1-{self.max_fish}) are currently in use!")
-        print(f"   Active tracks: {len(self.active_tracks)}, Lost fish: {len(self.lost_fish)}")
-        return None  # IDを割り当てられない
+        new_id = self.next_id
+        self.next_id += 1
+        return new_id
     
     def add_discarded_id(self, fish_id, position, frame_id):
         """破棄されたIDを記録（位置情報も含む）"""
@@ -200,7 +183,7 @@ class ObjectTracker:
         distance = np.linalg.norm(detection[:2] - old_bbox[:2])
         
         # ===== 改善7: 距離閾値を拡大 =====
-        if distance > 250:  # 200 → 250に拡大
+        if distance > 300:  # 250 → 300に拡大（より遠くてもマッチング可能）
             return float('inf')
         
         # 方向コスト
@@ -383,12 +366,12 @@ class ObjectTracker:
                         old_bbox = self.track_history[track_id][-1]
                         distance = np.linalg.norm(bbox[:2] - old_bbox[:2])
                 
-                        if distance < 250 and distance < min_cost:  # 200 → 250
+                        if distance < 300 and distance < min_cost:  # 250 → 300に拡大
                             min_cost = distance
                             best_match_id = track_id
             
             # ===== 改善14: マッチングコスト閾値を緩和 =====
-            if best_match_id is not None and min_cost < 200:  # 150 → 200に拡大
+            if best_match_id is not None and min_cost < 250:  # 200 → 250に拡大（マッチングしやすく）
                 current_detections.add(best_match_id)
                 matched = True
                 self.missed_frames[best_match_id] = 0
@@ -397,10 +380,15 @@ class ObjectTracker:
                 self.update_position_history(best_match_id, frame_id, bbox[0], bbox[1], "detection")
                 print(f"✓ Matched detection to track {best_match_id} (cost: {min_cost:.2f})")
             elif best_match_id is not None:
-                print(f"✗ Match cost too high: {min_cost:.2f} > 200")
+                print(f"✗ Match cost too high: {min_cost:.2f} > 250")
             
             # 既存の追跡にマッチしなかった場合
             if not matched:
+                # ===== 追加: 最大トラッキング数に達している場合は新規追加をスキップ =====
+                if len(self.active_tracks) >= self.max_active_tracks:
+                    print(f"⛔ Cannot add new track: Already tracking {self.max_active_tracks} objects (max limit)")
+                    continue  # 新しいIDを作成せずスキップ
+                
                 reusable_id = self.find_reusable_id(bbox, frame_id)
                 if reusable_id is not None:
                     current_detections.add(reusable_id)
@@ -426,18 +414,13 @@ class ObjectTracker:
                         print(f"✓ Reused discarded ID {nearest_discarded_id}")
                     else:
                         new_id = self.get_new_id()
-                        
-                        # IDが割り当てられた場合のみ処理
-                        if new_id is not None:
-                            current_detections.add(new_id)
-                            self.active_tracks[new_id] = bbox
-                            self.track_history[new_id] = deque(maxlen=self.sequence_length)
-                            self.track_history[new_id].append(self.preprocess_detection(bbox))
-                            self.missed_frames[new_id] = 0
-                            self.update_position_history(new_id, frame_id, bbox[0], bbox[1], "detection")
-                            print(f"➕ Created new ID {new_id}")
-                        else:
-                            print(f"❌ Cannot assign ID: Maximum tracking limit ({self.max_fish}) reached")
+                        current_detections.add(new_id)
+                        self.active_tracks[new_id] = bbox
+                        self.track_history[new_id] = deque(maxlen=self.sequence_length)
+                        self.track_history[new_id].append(self.preprocess_detection(bbox))
+                        self.missed_frames[new_id] = 0
+                        self.update_position_history(new_id, frame_id, bbox[0], bbox[1], "detection")
+                        print(f"➕ Created new ID {new_id}")
         
         # 見失った物体の処理
         for track_id in list(self.active_tracks.keys()):
@@ -445,7 +428,7 @@ class ObjectTracker:
                 self.missed_frames[track_id] = self.missed_frames.get(track_id, 0) + 1
                 
                 # ===== 改善15: 見失いフレーム数を延長 =====
-                if self.missed_frames[track_id] > 45:  # 30 → 45に延長
+                if self.missed_frames[track_id] > 60:  # 45 → 60に延長（より長く保持）
                     missed_count = self.missed_frames[track_id]
                     self.release_id(track_id, frame_id)
                     print(f"❌ Lost fish ID {track_id} after {missed_count} frames")
@@ -459,13 +442,19 @@ class ObjectTracker:
             for track_id, bbox in self.active_tracks.items():
                 predictions[track_id] = [bbox[0], bbox[1], bbox[2], bbox[3]]
             
+            # ===== デバッグ: 評価更新の詳細ログ =====
             if frame_id % 100 == 0:
                 print(f"📊 Frame {frame_id}: GT={len(ground_truth)}, Predictions={len(predictions)}")
+                # 中間評価結果を表示
+                intermediate_summary = self.evaluator.get_summary()
+                print(f"   Intermediate - IDF1: {intermediate_summary.get('IDF1', 0):.4f}, "
+                      f"ID_Switches: {intermediate_summary.get('ID_Switches', 0)}")
             
             self.evaluator.update_frame(ground_truth, predictions)
         elif self.enable_evaluation and ground_truth is None:
             if frame_id % 100 == 0:
-                print(f"⚠️ Frame {frame_id}: No Ground Truth data available")
+                print(f"⚠️ Frame {frame_id}: No Ground Truth data available - SKIPPING EVALUATION UPDATE")
+                print(f"   This will cause evaluation metrics to be unreliable!")
 
     def load_ground_truth(self, gt_path, frame_id):
         """MOTChallenge形式のGround Truthを読み込み"""
@@ -566,6 +555,13 @@ class ObjectTracker:
             ground_truth = None
             if self.enable_evaluation and ground_truth_path is not None:
                 ground_truth = self.load_ground_truth(ground_truth_path, frame_count)
+                
+                # ===== デバッグ: Ground Truthの状態を確認 =====
+                if frame_count % 500 == 0:  # 500フレームごとに表示
+                    if ground_truth:
+                        print(f"🔍 Frame {frame_count}: GT has {len(ground_truth)} objects")
+                    else:
+                        print(f"⚠️ Frame {frame_count}: GT is None or empty")
             
             if detections:
                 self.update_tracking(frame_count, detections, ground_truth)
@@ -613,6 +609,25 @@ class ObjectTracker:
         out.release()
         cv2.destroyAllWindows()
         print(f"Tracking result saved to {output_path}")
+        
+        # ===== デバッグ: 最終評価前の状態確認 =====
+        if self.enable_evaluation:
+            print("\n" + "="*60)
+            print("🔍 Pre-Final Evaluation Debug Info")
+            print("="*60)
+            print(f"Total frames processed: {frame_count}")
+            
+            # Evaluatorの内部状態を確認（可能な場合）
+            if hasattr(self.evaluator, 'total_frames'):
+                print(f"Evaluator total frames: {self.evaluator.total_frames}")
+            if hasattr(self.evaluator, 'IDTP'):
+                print(f"IDTP (ID True Positives): {self.evaluator.IDTP}")
+            if hasattr(self.evaluator, 'IDFP'):
+                print(f"IDFP (ID False Positives): {self.evaluator.IDFP}")
+            if hasattr(self.evaluator, 'IDFN'):
+                print(f"IDFN (ID False Negatives): {self.evaluator.IDFN}")
+            
+            print("="*60 + "\n")
         
         if self.enable_evaluation:
             print("\n" + "="*60)
@@ -688,20 +703,17 @@ if __name__ == "__main__":
         print("   Evaluation mode will be disabled.")
         print("   Please generate Ground Truth using ground_truth.py first.\n")
     
-    # 最大トラッキング数を設定（IDは1〜max_fishの範囲で割り当てられます）
-    MAX_FISH = 10  # この値を変更することで最大トラッキング数を調整できます
-    
     tracker = ObjectTracker(
         model_path=model_path,
         sequence_length=10,
-        max_fish=MAX_FISH,
+        max_fish=10,  # 最大10匹に制限
         use_lstm=True,
         enable_evaluation=enable_evaluation
     )
     
     print("Starting LSTM+Kalman Filter enhanced object tracking...")
     print(f"Using device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
-    print(f"Maximum tracking objects: {MAX_FISH} (IDs will be assigned from 1 to {MAX_FISH})")
+    print(f"🔢 Maximum tracking limit: 10 objects")
     print("Hybrid prediction features:")
     print("  - LSTM neural network for pattern learning")
     print("  - Kalman filter for motion prediction")

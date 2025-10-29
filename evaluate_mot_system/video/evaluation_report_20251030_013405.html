@@ -1,0 +1,277 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MOT評価レポート</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Hiragino Sans', 'Meiryo', 'MS PGothic', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        .content {
+            padding: 40px;
+        }
+        .score-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .score-card {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            border-radius: 10px;
+            padding: 25px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }
+        .score-card:hover {
+            transform: translateY(-5px);
+        }
+        .score-card h3 {
+            font-size: 1.1em;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .score-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #2c3e50;
+            margin: 10px 0;
+        }
+        .score-grade {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .metric-box {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            border-left: 4px solid #667eea;
+        }
+        .metric-box h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        .metric-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .metric-label {
+            color: #7f8c8d;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        .plot-section {
+            text-align: center;
+            margin: 40px 0;
+            background: #f8f9fa;
+            padding: 30px;
+            border-radius: 10px;
+        }
+        .plot-section img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .summary-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 30px;
+        }
+        .summary-table th,
+        .summary-table td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .summary-table th {
+            background: #667eea;
+            color: white;
+            font-weight: bold;
+        }
+        .summary-table tr:hover {
+            background: #f5f5f5;
+        }
+        .footer {
+            background: #2c3e50;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 MOT評価レポート</h1>
+            <p>Multiple Object Tracking Evaluation Report</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">生成日時: 2025年10月30日 01:34:06</p>
+        </div>
+        
+        <div class="content">
+            <h2 style="margin-bottom: 20px; color: #2c3e50;">📊 総合評価スコア</h2>
+            <div class="score-cards">
+                <div class="score-card">
+                    <h3>MOTA</h3>
+                    <div class="score-value">0.9948</div>
+                    <span class="score-grade" style="background: #28a745; color: white;">
+                        🟢 優秀
+                    </span>
+                    <p class="metric-label">Multiple Object Tracking Accuracy</p>
+                </div>
+                <div class="score-card">
+                    <h3>IDF1</h3>
+                    <div class="score-value">0.7609</div>
+                    <span class="score-grade" style="background: #ffc107; color: white;">
+                        🟡 良好
+                    </span>
+                    <p class="metric-label">ID F1 Score</p>
+                </div>
+                <div class="score-card">
+                    <h3>総合スコア</h3>
+                    <div class="score-value">92.55%</div>
+                    <span class="score-grade" style="background: #28a745; color: white;">
+                        🟢 優秀
+                    </span>
+                    <p class="metric-label">Weighted Average Score</p>
+                </div>
+            </div>
+            
+            <h2 style="margin-bottom: 20px; color: #2c3e50; margin-top: 40px;">📈 詳細メトリクス</h2>
+            <div class="metrics-grid">
+                <div class="metric-box">
+                    <h4>MOTP (Position Error)</h4>
+                    <div class="metric-value">0.74 pixels</div>
+                    <p class="metric-label">平均位置誤差（低いほど良い）</p>
+                </div>
+                <div class="metric-box">
+                    <h4>Precision</h4>
+                    <div class="metric-value">0.9976</div>
+                    <p class="metric-label">検出精度: 35,858 / (35,858 + 85)</p>
+                </div>
+                <div class="metric-box">
+                    <h4>Recall</h4>
+                    <div class="metric-value">0.9983</div>
+                    <p class="metric-label">検出再現率: 35,858 / (35,858 + 60)</p>
+                </div>
+                <div class="metric-box">
+                    <h4>F1 Score</h4>
+                    <div class="metric-value">0.9980</div>
+                    <p class="metric-label">PrecisionとRecallの調和平均</p>
+                </div>
+                <div class="metric-box">
+                    <h4>ID Switches</h4>
+                    <div class="metric-value">41</div>
+                    <p class="metric-label">ID切り替わり回数（低いほど良い）</p>
+                </div>
+                <div class="metric-box">
+                    <h4>Fragmentations</h4>
+                    <div class="metric-value">18</div>
+                    <p class="metric-label">トラック断片化回数（低いほど良い）</p>
+                </div>
+            </div>
+            
+            <div class="plot-section">
+                <h2 style="margin-bottom: 20px; color: #2c3e50;">📊 可視化グラフ</h2>
+                <img src="evaluation_report_20251030_013405_plots.png" alt="Evaluation Plots">
+            </div>
+            
+            <h2 style="margin-bottom: 20px; color: #2c3e50; margin-top: 40px;">📋 統計サマリー</h2>
+            <table class="summary-table">
+                <thead>
+                    <tr>
+                        <th>項目</th>
+                        <th>値</th>
+                        <th>説明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Total Frames</strong></td>
+                        <td>3,600</td>
+                        <td>処理された総フレーム数</td>
+                    </tr>
+                    <tr>
+                        <td><strong>True Positives</strong></td>
+                        <td>35,858</td>
+                        <td>正しく検出・追跡できた数</td>
+                    </tr>
+                    <tr>
+                        <td><strong>False Positives</strong></td>
+                        <td>85</td>
+                        <td>誤検出数</td>
+                    </tr>
+                    <tr>
+                        <td><strong>False Negatives</strong></td>
+                        <td>60</td>
+                        <td>見逃し数</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Average Track Length</strong></td>
+                        <td>3585.8 frames</td>
+                        <td>平均トラック長</td>
+                    </tr>
+                    <tr>
+                        <td><strong>ID Switches Rate</strong></td>
+                        <td>1.14%</td>
+                        <td>フレームあたりのID切り替わり率</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Fragmentation Rate</strong></td>
+                        <td>0.50%</td>
+                        <td>フレームあたりの断片化率</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="footer">
+            <p>Generated by MOT Evaluation Visualization Tool</p>
+        </div>
+    </div>
+</body>
+</html>
