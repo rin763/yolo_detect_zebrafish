@@ -646,7 +646,7 @@ if __name__ == "__main__":
         max_fish=MAX_FISH
     )
     
-    video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3min_3D_left.mp4"
+    video_path = "/Users/rin/Documents/畢業專題/YOLO/video/test/9min_3D_left.mp4"
     
     # ========================================
     # 使用例1: 半自動生成（推奨）

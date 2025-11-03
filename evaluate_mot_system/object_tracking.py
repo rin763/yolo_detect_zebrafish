@@ -693,7 +693,7 @@ class ObjectTracker:
 
 if __name__ == "__main__":
     model_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/train_results/weights/best.pt"
-    video_path = "/Users/rin/Documents/畢業專題/YOLO/video/3min_3D_left.mp4"
+    video_path = "/Users/rin/Documents/畢業專題/YOLO/video/test/9min_3D_left.mp4"
     ground_truth_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt"
     
     enable_evaluation = ground_truth_path is not None and os.path.exists(ground_truth_path)
