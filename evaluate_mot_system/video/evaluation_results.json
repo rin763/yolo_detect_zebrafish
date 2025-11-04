@@ -1,12 +1,12 @@
 {
-  "MOTA": 0.9948215379475472,
-  "MOTP": 0.7402266397817414,
-  "IDF1": 0.7608928140200779,
-  "ID_Switches": 41,
-  "Fragmentations": 18,
-  "True_Positives": 35858,
-  "False_Positives": 85,
-  "False_Negatives": 60,
-  "Total_Frames": 3600,
-  "Avg_Track_Length": 3585.8
+  "MOTA": 0.9774460565476191,
+  "MOTP": 0.7940009525741997,
+  "IDF1": 0.44110653598561733,
+  "ID_Switches": 362,
+  "Fragmentations": 313,
+  "True_Positives": 106672,
+  "False_Positives": 1215,
+  "False_Negatives": 848,
+  "Total_Frames": 10800,
+  "Avg_Track_Length": 10667.2
 }

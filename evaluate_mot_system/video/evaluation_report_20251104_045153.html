@@ -149,7 +149,7 @@
         <div class="header">
             <h1>🎯 MOT評価レポート</h1>
             <p>Multiple Object Tracking Evaluation Report</p>
-            <p style="margin-top: 10px; font-size: 0.9em;">生成日時: 2025年10月30日 01:34:06</p>
+            <p style="margin-top: 10px; font-size: 0.9em;">生成日時: 2025年11月04日 04:51:54</p>
         </div>
         
         <div class="content">
@@ -157,7 +157,7 @@
             <div class="score-cards">
                 <div class="score-card">
                     <h3>MOTA</h3>
-                    <div class="score-value">0.9948</div>
+                    <div class="score-value">0.9774</div>
                     <span class="score-grade" style="background: #28a745; color: white;">
                         🟢 優秀
                     </span>
@@ -165,17 +165,17 @@
                 </div>
                 <div class="score-card">
                     <h3>IDF1</h3>
-                    <div class="score-value">0.7609</div>
-                    <span class="score-grade" style="background: #ffc107; color: white;">
-                        🟡 良好
+                    <div class="score-value">0.4411</div>
+                    <span class="score-grade" style="background: #dc3545; color: white;">
+                        🔴 要改善
                     </span>
                     <p class="metric-label">ID F1 Score</p>
                 </div>
                 <div class="score-card">
                     <h3>総合スコア</h3>
-                    <div class="score-value">92.55%</div>
-                    <span class="score-grade" style="background: #28a745; color: white;">
-                        🟢 優秀
+                    <div class="score-value">81.99%</div>
+                    <span class="score-grade" style="background: #ffc107; color: white;">
+                        🟡 良好
                     </span>
                     <p class="metric-label">Weighted Average Score</p>
                 </div>
@@ -185,39 +185,39 @@
             <div class="metrics-grid">
                 <div class="metric-box">
                     <h4>MOTP (Position Error)</h4>
-                    <div class="metric-value">0.74 pixels</div>
+                    <div class="metric-value">0.79 pixels</div>
                     <p class="metric-label">平均位置誤差（低いほど良い）</p>
                 </div>
                 <div class="metric-box">
                     <h4>Precision</h4>
-                    <div class="metric-value">0.9976</div>
-                    <p class="metric-label">検出精度: 35,858 / (35,858 + 85)</p>
+                    <div class="metric-value">0.9887</div>
+                    <p class="metric-label">検出精度: 106,672 / (106,672 + 1,215)</p>
                 </div>
                 <div class="metric-box">
                     <h4>Recall</h4>
-                    <div class="metric-value">0.9983</div>
-                    <p class="metric-label">検出再現率: 35,858 / (35,858 + 60)</p>
+                    <div class="metric-value">0.9921</div>
+                    <p class="metric-label">検出再現率: 106,672 / (106,672 + 848)</p>
                 </div>
                 <div class="metric-box">
                     <h4>F1 Score</h4>
-                    <div class="metric-value">0.9980</div>
+                    <div class="metric-value">0.9904</div>
                     <p class="metric-label">PrecisionとRecallの調和平均</p>
                 </div>
                 <div class="metric-box">
                     <h4>ID Switches</h4>
-                    <div class="metric-value">41</div>
+                    <div class="metric-value">362</div>
                     <p class="metric-label">ID切り替わり回数（低いほど良い）</p>
                 </div>
                 <div class="metric-box">
                     <h4>Fragmentations</h4>
-                    <div class="metric-value">18</div>
+                    <div class="metric-value">313</div>
                     <p class="metric-label">トラック断片化回数（低いほど良い）</p>
                 </div>
             </div>
             
             <div class="plot-section">
                 <h2 style="margin-bottom: 20px; color: #2c3e50;">📊 可視化グラフ</h2>
-                <img src="evaluation_report_20251030_013405_plots.png" alt="Evaluation Plots">
+                <img src="evaluation_report_20251104_045153_plots.png" alt="Evaluation Plots">
             </div>
             
             <h2 style="margin-bottom: 20px; color: #2c3e50; margin-top: 40px;">📋 統計サマリー</h2>
@@ -232,37 +232,37 @@
                 <tbody>
                     <tr>
                         <td><strong>Total Frames</strong></td>
-                        <td>3,600</td>
+                        <td>10,800</td>
                         <td>処理された総フレーム数</td>
                     </tr>
                     <tr>
                         <td><strong>True Positives</strong></td>
-                        <td>35,858</td>
+                        <td>106,672</td>
                         <td>正しく検出・追跡できた数</td>
                     </tr>
                     <tr>
                         <td><strong>False Positives</strong></td>
-                        <td>85</td>
+                        <td>1,215</td>
                         <td>誤検出数</td>
                     </tr>
                     <tr>
                         <td><strong>False Negatives</strong></td>
-                        <td>60</td>
+                        <td>848</td>
                         <td>見逃し数</td>
                     </tr>
                     <tr>
                         <td><strong>Average Track Length</strong></td>
-                        <td>3585.8 frames</td>
+                        <td>10667.2 frames</td>
                         <td>平均トラック長</td>
                     </tr>
                     <tr>
                         <td><strong>ID Switches Rate</strong></td>
-                        <td>1.14%</td>
+                        <td>3.35%</td>
                         <td>フレームあたりのID切り替わり率</td>
                     </tr>
                     <tr>
                         <td><strong>Fragmentation Rate</strong></td>
-                        <td>0.50%</td>
+                        <td>2.90%</td>
                         <td>フレームあたりの断片化率</td>
                     </tr>
                 </tbody>

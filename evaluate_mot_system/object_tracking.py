@@ -1,3 +1,4 @@
+# 以下はobject_tracking.pyのコードです。
 import cv2
 import numpy as np
 from ultralytics import YOLO

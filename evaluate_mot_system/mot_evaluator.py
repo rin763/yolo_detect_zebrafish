@@ -1,3 +1,4 @@
+# 以下はmot_evaluator.pyのコードです。
 """
 MOT (Multiple Object Tracking) 評価システム - 修正版
 IDF1計算のバグを修正し、より正確な評価を実現

@@ -631,6 +631,143 @@ class GroundTruthGenerator:
                 # MOTChallenge形式: frame, id, x, y, w, h, conf, -1, -1, -1
                 f.write(f"{det['frame']},{det['id']},{det['x']:.2f},{det['y']:.2f},"
                        f"{det['w']:.2f},{det['h']:.2f},{det.get('conf', 1.0):.2f},-1,-1,-1\n")
+    
+    def add_single_frame(self, video_path, frame_number, existing_gt_path=None, output_path=None):
+        """
+        特定のフレームだけを処理して、既存のGround Truthファイルに追加
+        
+        Args:
+            video_path: 入力動画
+            frame_number: 処理するフレーム番号（1ベース）
+            existing_gt_path: 既存のGround Truthファイルのパス（Noneの場合は新規作成）
+            output_path: 出力ファイルのパス（Noneの場合はexisting_gt_pathと同じ）
+        
+        Returns:
+            保存されたファイルのパス
+        """
+        print(f"\n=== 単一フレーム処理: Frame {frame_number} ===")
+        
+        if output_path is None:
+            if existing_gt_path:
+                output_path = existing_gt_path
+            else:
+                output_path = "ground_truth/frame_{frame_number}.txt"
+        
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        if frame_number < 1 or frame_number > total_frames:
+            print(f"❌ エラー: フレーム番号 {frame_number} は範囲外です（1-{total_frames}）")
+            cap.release()
+            return None
+        
+        # 指定フレームに移動（0ベース）
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number - 1)
+        ret, frame = cap.read()
+        
+        if not ret:
+            print(f"❌ エラー: フレーム {frame_number} を読み込めませんでした")
+            cap.release()
+            return None
+        
+        print(f"✅ フレーム {frame_number} を読み込みました")
+        
+        # ObjectTrackerでの検出と追跡
+        results = self.tracker.yolo.track(frame, persist=True)
+        detections = []
+        if results[0].boxes is not None:
+            detections.extend(results[0].boxes)
+        
+        # ObjectTrackerで追跡を更新
+        if detections:
+            self.tracker.update_tracking(frame_number, detections)
+        
+        # フレームデータを収集
+        boxes_info = []
+        
+        # ObjectTrackerのactive_tracksを使用
+        for track_id, bbox in self.tracker.active_tracks.items():
+            display_id = self.id_corrections.get((frame_number, track_id), track_id)
+            
+            if display_id is None:
+                continue
+            
+            x, y, w, h = bbox
+            x1 = x - w/2
+            y1 = y - h/2
+            x2 = x + w/2
+            y2 = y + h/2
+            
+            boxes_info.append({
+                'yolo_id': track_id,
+                'display_id': display_id,
+                'bbox': (int(x1), int(y1), int(x2), int(y2)),
+                'frame': frame_number
+            })
+        
+        cap.release()
+        
+        # 既存のGround Truthを読み込む（ある場合）
+        existing_data = []
+        if existing_gt_path and os.path.exists(existing_gt_path):
+            print(f"📖 既存のGround Truthを読み込み中: {existing_gt_path}")
+            with open(existing_gt_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split(',')
+                    if len(parts) < 6:
+                        continue
+                    try:
+                        existing_frame = int(parts[0])
+                        # 欠けているフレームのデータは除外
+                        if existing_frame != frame_number:
+                            existing_data.append({
+                                'frame': existing_frame,
+                                'id': int(parts[1]),
+                                'x': float(parts[2]),
+                                'y': float(parts[3]),
+                                'w': float(parts[4]),
+                                'h': float(parts[5]),
+                                'conf': float(parts[6]) if len(parts) > 6 else 1.0
+                            })
+                    except ValueError:
+                        continue
+            print(f"   既存データ: {len(existing_data)} エントリ")
+        
+        # 新しいフレームのデータを追加
+        new_frame_data = []
+        for box_info in boxes_info:
+            x1, y1, x2, y2 = box_info['bbox']
+            obj_id = self.id_corrections.get(
+                (frame_number, box_info['yolo_id']), 
+                box_info['display_id']
+            )
+            
+            if obj_id is None:
+                continue
+            
+            new_frame_data.append({
+                'frame': frame_number,
+                'id': obj_id,
+                'x': x1,
+                'y': y1,
+                'w': x2 - x1,
+                'h': y2 - y1,
+                'conf': 1.0
+            })
+        
+        print(f"✅ フレーム {frame_number} のデータ: {len(new_frame_data)} 物体")
+        
+        # 既存データと新しいデータを結合
+        all_data = existing_data + new_frame_data
+        
+        # 保存
+        self._save_mot_format(all_data, output_path)
+        
+        print(f"\n✅ 完了！Ground Truthを保存しました: {output_path}")
+        print(f"   総エントリ数: {len(all_data)}")
+        print(f"   フレーム範囲: {min(d['frame'] for d in all_data)} - {max(d['frame'] for d in all_data)}")
+        
+        return output_path
 
 
 # 使用例
@@ -660,6 +797,22 @@ if __name__ == "__main__":
         output_path="/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt",
         review_interval=30  # 30フレームごとに確認
     )
+    
+    # # ========================================
+    # # 使用例: 欠けているフレームを追加
+    # # ========================================
+    # print("\n【追加機能】欠けているフレームを補完")
+    # print("既存のGround Truthに特定フレームのデータを追加します")
+    # 
+    # existing_gt = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt"
+    # missing_frame = 5040  # 欠けているフレーム番号
+    # 
+    # generator.add_single_frame(
+    #     video_path=video_path,
+    #     frame_number=missing_frame,
+    #     existing_gt_path=existing_gt,
+    #     output_path=existing_gt  # 既存ファイルを上書き
+    # )
     
     # # ========================================
     # # 使用例2: 完全自動生成（比較用）
