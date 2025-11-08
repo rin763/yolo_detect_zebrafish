@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from collections import deque
 import cv2
+import os
 
 class KalmanFilter:
     """カルマンフィルタによる位置予測"""
@@ -141,12 +142,28 @@ class LSTMKalmanPredictor(nn.Module):
 class LSTMKalmanTracker:
     """LSTMとカルマンフィルタを組み合わせた追跡システム"""
     
-    def __init__(self, sequence_length=10, device='cpu'):
+    def __init__(self, sequence_length=10, device='cpu', model_path=None):
         self.sequence_length = sequence_length
         self.device = device
         
         # LSTMモデル
         self.lstm_model = LSTMKalmanPredictor().to(device)
+        self.pretrained_state_dict = None
+        self.using_pretrained_model = False
+        
+        if model_path:
+            if os.path.exists(model_path):
+                try:
+                    state_dict = torch.load(model_path, map_location=device)
+                    self.lstm_model.load_state_dict(state_dict)
+                    self.lstm_model.eval()
+                    self.pretrained_state_dict = state_dict
+                    self.using_pretrained_model = True
+                    print(f"✅ Loaded pretrained LSTM model from {model_path}")
+                except Exception as e:
+                    print(f"⚠️ Failed to load pretrained LSTM model from {model_path}: {e}")
+            else:
+                print(f"⚠️ Pretrained LSTM model not found: {model_path}")
         
         # 各トラックのカルマンフィルタとLSTM状態
         self.track_filters = {}  # {track_id: KalmanFilter}
@@ -189,6 +206,12 @@ class LSTMKalmanTracker:
         
         # LSTMモデルを作成
         lstm_model = LSTMKalmanPredictor().to(self.device)
+        if self.pretrained_state_dict is not None:
+            try:
+                lstm_model.load_state_dict(self.pretrained_state_dict)
+                lstm_model.eval()
+            except Exception as e:
+                print(f"⚠️ Failed to load pretrained weights for track {track_id}: {e}")
         sequence = deque(maxlen=self.sequence_length)
         
         self.track_filters[track_id] = kalman_filter

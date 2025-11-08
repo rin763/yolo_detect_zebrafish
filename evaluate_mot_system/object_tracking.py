@@ -10,7 +10,8 @@ from mot_evaluator import MOTEvaluator
 import json
 
 class ObjectTracker:
-    def __init__(self, model_path, sequence_length=10, max_fish=10, use_lstm=True, enable_evaluation=False):
+    def __init__(self, model_path, sequence_length=10, max_fish=10, use_lstm=True,
+                 enable_evaluation=False, lstm_model_path=None):
         if model_path is not None:
             self.yolo = YOLO(model_path)
         else:
@@ -29,11 +30,15 @@ class ObjectTracker:
         # LSTM+カルマンフィルタ強化トラッカーの初期化
         if self.use_lstm:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            self.lstm_model_path = lstm_model_path
             self.lstm_kalman_tracker = LSTMKalmanTracker(
                 sequence_length=sequence_length,
-                device=device
+                device=device,
+                model_path=lstm_model_path
             )
             print(f"LSTM+Kalman tracker initialized on {device}")
+        else:
+            self.lstm_kalman_tracker = None
         
         # 物体の追跡履歴を保存
         self.track_history = {}
@@ -44,25 +49,24 @@ class ObjectTracker:
         self.active_tracks = {}
         self.missed_frames = {}
         
-        # ===== 改善1: 見失った魚の管理を緩和 =====
         self.lost_fish = {}
-        self.reuse_distance_threshold = 400  # 300 → 400に拡大（より遠くても再検出）
-        self.max_lost_frames = 120  # 90 → 120に延長（より長く記憶）
+        self.reuse_distance_threshold = 70
+        self.max_lost_frames = 60
         
         # ===== 改善2: マッチングスコアの閾値を大幅緩和 =====
         self.reuse_score_threshold = 0.02
         self.lstm_prediction_range = 200
-        self.distance_score_weight = 0.7
-        self.lstm_score_weight = 0.3
+        self.distance_score_weight = 0.3
+        self.lstm_score_weight = 0.7
         
         # 破棄されたIDを記録するシステム
         self.discarded_ids = {}
         self.max_discarded_ids = 10
-        self.discarded_id_reuse_distance = 200  # 150 → 200に拡大
+        self.discarded_id_reuse_distance = 60 
         
         # ===== 改善3: マッチングパラメータの調整 =====
         self.use_direction_matching = True
-        self.direction_weight = 0.1  # 0.2 → 0.1に減少（方向の影響を減らす）
+        self.direction_weight = 0.1   # 0.2 → 0.1に減少（方向の影響を減らす）
         self.distance_weight = 0.85  # 0.8 → 0.85に増加（距離を最重視）
         self.direction_threshold = 1.5  # 1.0 → 1.5に緩和（約86度まで許容）
         
@@ -75,7 +79,7 @@ class ObjectTracker:
         self.max_active_tracks = max_fish  # 最大同時トラッキング数を設定
         
         # ===== 改善6: 信頼度フィルタリング追加 =====
-        self.min_detection_confidence = 0.3  # YOLO検出の最小信頼度
+        self.min_detection_confidence = 0.3   # YOLO検出の最小信頼度
         
     
     def update_position_history(self, track_id, frame_id, x, y, source="detection"):
@@ -253,7 +257,7 @@ class ObjectTracker:
             del self.track_history[obj_id]
     
     def find_reusable_id(self, new_position, current_frame):
-        """見失った魚の中で再利用可能なIDを探す（大幅緩和版）"""
+        """見失った魚の中で再利用可能なIDを探す"""
         reusable_id = None
         min_distance = float('inf')
         best_total_score = 0.0
@@ -696,6 +700,7 @@ if __name__ == "__main__":
     model_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/train_results/weights/best.pt"
     video_path = "/Users/rin/Documents/畢業專題/YOLO/video/test/9min_3D_left.mp4"
     ground_truth_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt"
+    lstm_model_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/best_reid_lstm_model.pth"
     
     enable_evaluation = ground_truth_path is not None and os.path.exists(ground_truth_path)
     
@@ -709,7 +714,8 @@ if __name__ == "__main__":
         sequence_length=10,
         max_fish=10,  # 最大10匹に制限
         use_lstm=True,
-        enable_evaluation=enable_evaluation
+        enable_evaluation=enable_evaluation,
+        lstm_model_path=lstm_model_path
     )
     
     print("Starting LSTM+Kalman Filter enhanced object tracking...")

@@ -28,7 +28,7 @@ class GroundTruthGenerator:
     # 最大トラッキング数の定数（object_tracking.pyと同じ）
     MAX_FISH = 10  # IDは1〜10の範囲で割り当てられます
     
-    def __init__(self, model_path, max_fish=None, use_lstm=True, enable_evaluation=False):
+    def __init__(self, model_path, max_fish=None, use_lstm=True, enable_evaluation=False, lstm_model_path=None):
         """
         ObjectTrackerを使用してGround Truthを生成
         
@@ -47,7 +47,8 @@ class GroundTruthGenerator:
             sequence_length=10,
             max_fish=max_fish,  # object_tracking.pyと同じ設定
             use_lstm=use_lstm,
-            enable_evaluation=enable_evaluation
+            enable_evaluation=enable_evaluation,
+            lstm_model_path=lstm_model_path
         )
         self.ground_truth_data = []
         self.id_corrections = {}  # ユーザーによるID修正記録
@@ -466,135 +467,6 @@ class GroundTruthGenerator:
         print(f"\nGround Truth生成完了: {output_path}")
         return output_path
     
-    # def method2_full_automatic(self, video_path, output_path, confidence_threshold=0.5):
-    #     """
-    #     方法2: 完全自動生成（比較用）
-        
-    #     ObjectTrackerの結果をそのままGround Truthとして保存
-    #     異なる設定で動かした時の比較基準として使用
-        
-    #     Args:
-    #         video_path: 入力動画
-    #         output_path: Ground Truth保存先
-    #         confidence_threshold: 信頼度閾値
-    #     """
-    #     print("\n=== 方法2: 完全自動Ground Truth生成（ObjectTracker使用）===")
-    #     print(f"最大トラッキング数: {self.max_fish} (IDは1-{self.max_fish}で割り当て)")
-    #     print("ObjectTrackerの結果をそのまま保存します...")
-        
-    #     cap = cv2.VideoCapture(video_path)
-    #     # object_tracking.pyと同じフレームカウント方式（フレーム1から始まる）
-    #     frame_count = 0  # 初期化は0（object_tracking.pyと同じ）
-    #     all_detections = []
-        
-    #     # 動画の総フレーム数を取得（デバッグ用）
-    #     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    #     print(f"動画の総フレーム数: {total_frames}")
-        
-    #     while cap.isOpened():
-    #         # object_tracking.pyと同じ方式：フレームを読み込む
-    #         ret, frame = cap.read()
-    #         if not ret:
-    #             break
-            
-    #         frame_count += 1  # object_tracking.pyと同じ：読み込み後にカウント
-            
-    #         # YOLOで検出
-    #         results = self.tracker.yolo.track(frame, persist=True)
-            
-    #         # 検出結果を取得
-    #         detections = []
-    #         if results[0].boxes is not None:
-    #             detections.extend(results[0].boxes)
-            
-    #         # ObjectTrackerで追跡を更新
-    #         if detections:
-    #             self.tracker.update_tracking(frame_count, detections)
-            
-    #         # ObjectTrackerのactive_tracksを使用
-    #         for track_id, bbox in self.tracker.active_tracks.items():
-    #             x, y, w, h = bbox
-                
-    #             # MOTChallenge形式 (bboxは中心座標なので、左上角に変換)
-    #             all_detections.append({
-    #                 'frame': frame_count,
-    #                 'id': track_id,
-    #                 'x': x - w/2,
-    #                 'y': y - h/2,
-    #                 'w': w,
-    #                 'h': h,
-    #                 'conf': 1.0  # ObjectTrackerは信頼度を保持していないので1.0
-    #             })
-            
-    #         if frame_count % 100 == 0:
-    #             print(f"処理済み: {frame_count} フレーム、アクティブトラック: {len(self.tracker.active_tracks)}")
-        
-    #     cap.release()
-        
-    #     # MOTChallenge形式で保存
-    #     self._save_mot_format(all_detections, output_path)
-    #     print(f"完了: {len(all_detections)} 検出を保存")
-    #     return output_path
-    
-    # def method3_sampling(self, video_path, output_dir, sample_interval=30):
-    #     """
-    #     方法3: サンプリング生成（長時間動画用）
-        
-    #     N秒ごとにフレームを抽出し、画像として保存
-    #     CVAT/LabelImgなどの外部ツールで手動アノテーション
-        
-    #     Args:
-    #         video_path: 入力動画
-    #         output_dir: サンプル画像の保存先
-    #         sample_interval: サンプリング間隔（フレーム数）
-    #     """
-    #     print("\n=== 方法3: サンプリングGround Truth生成 ===")
-    #     print(f"{sample_interval}フレームごとに画像を抽出します")
-    #     print("これらの画像をCVATなどでアノテーションしてください")
-        
-    #     os.makedirs(output_dir, exist_ok=True)
-        
-    #     cap = cv2.VideoCapture(video_path)
-    #     frame_count = 0
-    #     saved_count = 0
-        
-    #     fps = cap.get(cv2.CAP_PROP_FPS)
-        
-    #     while cap.isOpened():
-    #         ret, frame = cap.read()
-    #         if not ret:
-    #             break
-            
-    #         frame_count += 1
-            
-    #         if frame_count % sample_interval == 0:
-    #             # フレームを保存
-    #             output_path = os.path.join(output_dir, f"frame_{frame_count:06d}.jpg")
-    #             cv2.imwrite(output_path, frame)
-    #             saved_count += 1
-                
-    #             # メタデータも保存
-    #             metadata_path = os.path.join(output_dir, f"frame_{frame_count:06d}.json")
-    #             with open(metadata_path, 'w') as f:
-    #                 json.dump({
-    #                     'frame_number': frame_count,
-    #                     'timestamp': frame_count / fps,
-    #                     'video_path': video_path
-    #                 }, f, indent=2)
-                
-    #             print(f"保存: {output_path}")
-        
-    #     cap.release()
-        
-    #     print(f"\n完了: {saved_count} フレームを保存")
-    #     print(f"保存先: {output_dir}")
-    #     print("\n次のステップ:")
-    #     print("1. CVATをインストール: pip install cvat-cli")
-    #     print("2. 画像をアップロード")
-    #     print("3. アノテーション作業")
-    #     print("4. MOTChallenge形式でエクスポート")
-        
-    #     return output_dir
     
     def _save_ground_truth(self, detections, output_path):
         """検出結果をMOTChallenge形式で保存"""
@@ -776,19 +648,17 @@ if __name__ == "__main__":
     MAX_FISH = 10  # この値を変更することで最大トラッキング数を調整できます
     
     model_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/train_results/weights/best.pt"
+    lstm_model_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/best_reid_lstm_model.pth"
     
     # GroundTruthGeneratorを初期化（max_fishを指定）
     generator = GroundTruthGenerator(
         model_path=model_path,
-        max_fish=MAX_FISH
+        max_fish=MAX_FISH,
+        lstm_model_path=lstm_model_path
     )
     
     video_path = "/Users/rin/Documents/畢業專題/YOLO/video/test/9min_3D_left.mp4"
     
-    # ========================================
-    # 使用例1: 半自動生成（推奨）
-    # ========================================
-    print("\n【推奨】方法1: 半自動生成")
     print("トラッカーが予測 → あなたが確認・修正")
     print(f"最大トラッキング数: {MAX_FISH} (IDs: 1-{MAX_FISH})")
     
@@ -798,40 +668,19 @@ if __name__ == "__main__":
         review_interval=30  # 30フレームごとに確認
     )
     
-    # # ========================================
-    # # 使用例: 欠けているフレームを追加
-    # # ========================================
+    # ========================================
+    # 欠けているフレームを追加
+    # ========================================
     # print("\n【追加機能】欠けているフレームを補完")
     # print("既存のGround Truthに特定フレームのデータを追加します")
-    # 
+    
     # existing_gt = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt"
-    # missing_frame = 5040  # 欠けているフレーム番号
-    # 
+    # missing_frame = 6870  # 欠けているフレーム番号
+    
     # generator.add_single_frame(
     #     video_path=video_path,
     #     frame_number=missing_frame,
     #     existing_gt_path=existing_gt,
     #     output_path=existing_gt  # 既存ファイルを上書き
     # )
-    
-    # # ========================================
-    # # 使用例2: 完全自動生成（比較用）
-    # # ========================================
-    # print("\n方法2: 完全自動生成（別の設定との比較用）")
-    
-    # baseline_gt = generator.method2_full_automatic(
-    #     video_path=video_path,
-    #     output_path="/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/baseline.txt",
-    #     confidence_threshold=0.5
-    # )
-    
-    # # ========================================
-    # # 使用例3: サンプリング（長時間動画用）
-    # # ========================================
-    # print("\n方法3: サンプリング生成（長時間動画向け）")
-    
-    # sample_dir = generator.method3_sampling(
-    #     video_path=video_path,
-    #     output_dir="/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/samples",
-    #     sample_interval=30  # 30フレーム = 1秒ごと（30fps想定）
-    # )
+   

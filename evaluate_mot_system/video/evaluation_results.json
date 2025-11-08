@@ -1,12 +1,12 @@
 {
-  "MOTA": 0.9774460565476191,
-  "MOTP": 0.7940009525741997,
-  "IDF1": 0.44110653598561733,
-  "ID_Switches": 362,
-  "Fragmentations": 313,
-  "True_Positives": 106672,
-  "False_Positives": 1215,
-  "False_Negatives": 848,
+  "MOTA": 0.9783757674837679,
+  "MOTP": 0.7930008657372165,
+  "IDF1": 0.4237628111273792,
+  "ID_Switches": 398,
+  "Fragmentations": 298,
+  "True_Positives": 106807,
+  "False_Positives": 1080,
+  "False_Negatives": 850,
   "Total_Frames": 10800,
-  "Avg_Track_Length": 10667.2
+  "Avg_Track_Length": 10680.7
 }
