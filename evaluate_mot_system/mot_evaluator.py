@@ -224,6 +224,15 @@ class MOTEvaluator:
                       if f < self.current_frame - self.position_history_size]
         for frame in old_frames:
             del self.recent_positions[frame]
+        
+        # 可視化用のマッチング結果を返す
+        return {
+            'matches': matches,
+            'unmatched_gt': unmatched_gt,
+            'unmatched_pred': unmatched_pred,
+            'ground_truth': ground_truth,
+            'predictions': predictions
+        }
     
     def calculate_mota(self):
         """MOTA (Multiple Object Tracking Accuracy) を計算"""

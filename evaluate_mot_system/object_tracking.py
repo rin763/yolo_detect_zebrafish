@@ -8,6 +8,8 @@ import torch
 from lstm_kalman_tracker import LSTMKalmanTracker
 from mot_evaluator import MOTEvaluator
 import json
+import matplotlib.pyplot as plt
+from datetime import datetime
 
 class ObjectTracker:
     def __init__(self, model_path, sequence_length=10, max_fish=10, use_lstm=True, enable_evaluation=False):
@@ -591,6 +593,62 @@ class ObjectTracker:
                                   (int(x1), int(y1)-10), 
                                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
             
+            # ===== 軌跡とLSTM予測位置の描画 =====
+            # 各アクティブなトラックに対して軌跡と予測位置を描画
+            for track_id in self.active_tracks.keys():
+                # 1. 移動軌跡の描画（position_historyから）
+                if track_id in self.position_history and len(self.position_history[track_id]) > 1:
+                    history = self.position_history[track_id]
+                    # 最新20フレーム分の軌跡を描画（50→20に短縮）
+                    points = []
+                    for entry in history[-20:]:
+                        _, hx, hy, _, _ = entry
+                        points.append((int(hx), int(hy)))
+                    
+                    # 軌跡を線でつなぐ（黄色）
+                    for i in range(len(points) - 1):
+                        cv2.line(frame, points[i], points[i+1], (0, 255, 255), 2)
+                    
+                    # 各履歴点を小さな円で描画（検出=緑、予測=水色）
+                    for i, entry in enumerate(history[-20:]):
+                        _, hx, hy, hsource, _ = entry
+                        px, py = int(hx), int(hy)
+                        if hsource == "detection":
+                            cv2.circle(frame, (px, py), 3, (0, 255, 0), -1)  # 緑色
+                        else:
+                            cv2.circle(frame, (px, py), 3, (255, 255, 0), -1)  # 水色
+                    
+                    # 最新の位置を強調表示（オレンジ）
+                    if points:
+                        latest_point = points[-1]
+                        cv2.circle(frame, latest_point, 5, (0, 165, 255), -1)
+                
+                # 2. LSTM予測位置の描画
+                if self.use_lstm and track_id in self.active_tracks:
+                    try:
+                        # LSTM+Kalman予測位置を取得
+                        pred_position, kalman_pos, confidence = self.lstm_kalman_tracker.predict_next_positions(track_id, steps=1)
+                        if pred_position is not None and confidence > 0.3:
+                            pred_x, pred_y = int(pred_position[0]), int(pred_position[1])
+                            # 予測位置を赤い円で描画
+                            cv2.circle(frame, (pred_x, pred_y), 6, (0, 0, 255), -1)
+                            # 現在位置から予測位置への線を描画（点線風）
+                            current_pos = self.active_tracks[track_id]
+                            current_x, current_y = int(current_pos[0]), int(current_pos[1])
+                            # 点線を描画（短い線分を繰り返し）
+                            num_dashes = 10
+                            for i in range(num_dashes):
+                                t1 = i / num_dashes
+                                t2 = (i + 0.5) / num_dashes
+                                x1 = int(current_x + (pred_x - current_x) * t1)
+                                y1 = int(current_y + (pred_y - current_y) * t1)
+                                x2 = int(current_x + (pred_x - current_x) * t2)
+                                y2 = int(current_y + (pred_y - current_y) * t2)
+                                cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 1)
+                    except Exception as e:
+                        # エラーが発生しても処理を続行
+                        pass
+            
             if self.enable_evaluation:
                 summary = self.evaluator.get_summary()
                 cv2.putText(frame, f"Frame: {frame_count}", (10, 30), 
@@ -642,9 +700,136 @@ class ObjectTracker:
             json_path = os.path.join(result_dir, "evaluation_results.json")
             self.evaluator.save_results(json_path)
             
+            # TP、FP、FNの可視化画像を保存（2x2表形式）
+            self.visualize_confusion_matrix(summary, result_dir)
+            
             return summary
         
         return None
+    
+    def visualize_confusion_matrix(self, summary, output_dir):
+        """TP、FP、FNの数値を2x2表で色の濃さで可視化して画像として保存"""
+        try:
+            # データの準備
+            tp = summary.get('True_Positives', 0)
+            fp = summary.get('False_Positives', 0)
+            fn = summary.get('False_Negatives', 0)
+            
+            # IDTP、IDFP、IDFNを取得
+            total_idtp = 0
+            total_idfp = 0
+            total_idfn = 0
+            
+            if hasattr(self.evaluator, 'pred_to_gt_counts') and self.evaluator.pred_to_gt_counts:
+                for pred_id, gt_counts in self.evaluator.pred_to_gt_counts.items():
+                    if not gt_counts:
+                        continue
+                    most_matched_gt = max(gt_counts.items(), key=lambda x: x[1])
+                    best_gt_id, best_count = most_matched_gt
+                    total_idtp += best_count
+                    for gt_id, count in gt_counts.items():
+                        if gt_id != best_gt_id:
+                            total_idfp += count
+                
+                total_idfn = self.evaluator.frame_metrics.get('false_negatives', 0)
+            
+            # 図の作成（2x2の表を2つ並べる）
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            
+            # 左側: Detection Metrics (TP, FP, FN)
+            ax1 = axes[0]
+            detection_values = np.array([[tp, fp], [fn, 0]])  # 2x2マトリックス
+            detection_labels = [['TP', 'FP'], ['FN', '-']]
+            
+            # 色の濃さを正規化（最大値で割る）
+            max_detection = max(tp, fp, fn, 1)  # 0除算を防ぐ
+            normalized_detection = detection_values / max_detection
+            
+            # カラーマップ（緑系）
+            im1 = ax1.imshow(normalized_detection, cmap='Greens', aspect='auto', vmin=0, vmax=1)
+            
+            # グリッドとラベルを追加
+            ax1.set_xticks([0, 1])
+            ax1.set_yticks([0, 1])
+            ax1.set_xticklabels(['Positive', 'Negative'], fontsize=11)
+            ax1.set_yticklabels(['Detected', 'Missed'], fontsize=11)
+            ax1.set_title('Detection Metrics', fontsize=14, fontweight='bold', pad=15)
+            
+            # 数値とラベルをセルに表示
+            for i in range(2):
+                for j in range(2):
+                    value = detection_values[i, j]
+                    label = detection_labels[i][j]
+                    color = 'white' if normalized_detection[i, j] > 0.5 else 'black'
+                    text = f'{label}\n{int(value)}'
+                    ax1.text(j, i, text, ha='center', va='center', 
+                            fontsize=12, fontweight='bold', color=color)
+            
+            # カラーバーを追加
+            cbar1 = plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+            cbar1.set_label('Normalized Value', rotation=270, labelpad=15)
+            
+            # 右側: ID Metrics (IDTP, IDFP, IDFN)
+            ax2 = axes[1]
+            id_values = np.array([[total_idtp, total_idfp], [total_idfn, 0]])
+            id_labels = [['IDTP', 'IDFP'], ['IDFN', '-']]
+            
+            # 色の濃さを正規化
+            max_id = max(total_idtp, total_idfp, total_idfn, 1)
+            normalized_id = id_values / max_id
+            
+            # カラーマップ（青系）
+            im2 = ax2.imshow(normalized_id, cmap='Blues', aspect='auto', vmin=0, vmax=1)
+            
+            # グリッドとラベルを追加
+            ax2.set_xticks([0, 1])
+            ax2.set_yticks([0, 1])
+            ax2.set_xticklabels(['Positive', 'Negative'], fontsize=11)
+            ax2.set_yticklabels(['Matched', 'Missed'], fontsize=11)
+            ax2.set_title('ID Metrics', fontsize=14, fontweight='bold', pad=15)
+            
+            # 数値とラベルをセルに表示
+            for i in range(2):
+                for j in range(2):
+                    value = id_values[i, j]
+                    label = id_labels[i][j]
+                    color = 'white' if normalized_id[i, j] > 0.5 else 'black'
+                    text = f'{label}\n{int(value)}'
+                    ax2.text(j, i, text, ha='center', va='center', 
+                            fontsize=12, fontweight='bold', color=color)
+            
+            # カラーバーを追加
+            cbar2 = plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            cbar2.set_label('Normalized Value', rotation=270, labelpad=15)
+            
+            # 全体のタイトルと統計情報
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fig.suptitle(f'Tracking Evaluation Results - {timestamp}', 
+                        fontsize=16, fontweight='bold', y=1.02)
+            
+            # 統計情報をテキストで追加
+            stats_text = f"MOTA: {summary.get('MOTA', 0):.4f} | " \
+                        f"MOTP: {summary.get('MOTP', 0):.2f}px | " \
+                        f"IDF1: {summary.get('IDF1', 0):.4f} | " \
+                        f"ID Switches: {summary.get('ID_Switches', 0)}"
+            
+            fig.text(0.5, 0.02, stats_text, ha='center', fontsize=10, 
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            plt.tight_layout()
+            
+            # 画像を保存
+            os.makedirs(output_dir, exist_ok=True)
+            vis_path = os.path.join(output_dir, f"tp_fp_fn_matrix_{timestamp}.png")
+            plt.savefig(vis_path, dpi=300, bbox_inches='tight')
+            print(f"\n💾 TP/FP/FN可視化画像（2x2表）を保存: {vis_path}")
+            
+            plt.close()
+            
+        except Exception as e:
+            print(f"⚠️ 可視化画像の保存中にエラーが発生しました: {e}")
+            import traceback
+            traceback.print_exc()
 
     def collect_training_data(self, video_path, output_dir):
         """動画から教師データを自動生成"""
