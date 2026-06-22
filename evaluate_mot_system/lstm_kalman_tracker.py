@@ -1,4 +1,3 @@
-# 以下はlstm_kalman_tracker.pyのコードです。
 import numpy as np
 import torch
 import torch.nn as nn
@@ -107,36 +106,55 @@ class KalmanFilter:
         return self.x.copy()
 
 class LSTMKalmanPredictor(nn.Module):
-    """LSTMとカルマンフィルタを組み合わせた予測モデル"""
+    """学習済みモデル(best_reid_lstm_model.pth)と一致するアーキテクチャ"""
     
-    def __init__(self, input_size=4, hidden_size=64, num_layers=2, output_size=4):
+    def __init__(self, input_size=4, hidden_size=128, num_layers=2, feature_dim=256):
         super(LSTMKalmanPredictor, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
         
-        # LSTM層
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        
-        # 出力層（位置と速度の修正値）
-        self.position_correction = nn.Linear(hidden_size, 2)  # 位置修正値
-        self.velocity_correction = nn.Linear(hidden_size, 2)   # 速度修正値
-        
-        # Dropout
-        self.dropout = nn.Dropout(0.1)
-        
+        # ↓ 修正: hidden_size=128, 入力4次元 に統一（train側と一致）
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
+                            batch_first=True, dropout=0.2)
+
+        # 位置予測ヘッド（motion_head）
+        self.motion_head = nn.Linear(hidden_size, 4)   # ← 修正: position_correction → motion_head
+
+        # 速度予測ヘッド（velocity_head）
+        self.velocity_head = nn.Linear(hidden_size, 2) # ← 修正: velocity_correction → velocity_head
+
+        # 特徴抽出ヘッド（Re-ID用）
+        self.feature_head = nn.Sequential(
+            nn.Linear(hidden_size, feature_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(feature_dim, feature_dim),
+            nn.ReLU(),
+            nn.Linear(feature_dim, feature_dim)
+        )
+
+        # 信頼度予測ヘッド
+        self.confidence_head = nn.Sequential(
+            nn.Linear(hidden_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+
     def forward(self, x):
-        # x shape: (batch_size, sequence_length, input_size)
+        # x: (batch_size, sequence_length, 4)
         lstm_out, _ = self.lstm(x)
-        
-        # 最後の出力のみを使用
         last_output = lstm_out[:, -1, :]
-        last_output = self.dropout(last_output)
-        
-        # 修正値を予測
-        pos_correction = self.position_correction(last_output)
-        vel_correction = self.velocity_correction(last_output)
-        
-        return pos_correction, vel_correction
+
+        motion_pred   = self.motion_head(last_output)
+        velocity_pred = self.velocity_head(last_output)
+        features      = self.feature_head(last_output)
+        confidence    = self.confidence_head(last_output)
+
+        return {
+            'motion_pred':   motion_pred,    # shape: (B, 4)
+            'velocity_pred': velocity_pred,  # shape: (B, 2)
+            'features':      features,       # shape: (B, 256)
+            'confidence':    confidence,     # shape: (B, 1)
+        }
 
 class LSTMKalmanTracker:
     """LSTMとカルマンフィルタを組み合わせた追跡システム"""
@@ -254,21 +272,22 @@ class LSTMKalmanTracker:
         sequence_tensor = torch.FloatTensor(list(sequence)).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
-            lstm_pos_correction, lstm_vel_correction = track_state['model'](sequence_tensor)
-        
-        # CPUに移動してnumpy配列に変換
-        lstm_correction = lstm_pos_correction.cpu().numpy()[0]
-        
-        # ハイブリッド予測（カルマンフィルタ + LSTM修正）
+            outputs = track_state['model'](sequence_tensor)  # ← dict が返る
+
+        # 修正前: lstm_pos_correction, lstm_vel_correction = track_state['model'](...)
+        # 修正後:
+        lstm_correction = outputs['motion_pred'].cpu().numpy()[0][:2]  # x,y成分のみ使用
+        confidence_val  = outputs['confidence'].cpu().numpy()[0][0]
+
         if kalman_pos is not None:
-            final_pos = (self.kalman_weight * kalman_pos + 
+            final_pos = (self.kalman_weight * kalman_pos +
                         self.lstm_weight * (kalman_pos + lstm_correction))
-            
-            # 信頼度を計算
-            confidence = min(len(sequence) / self.sequence_length, 1.0)
-            
+
+            # 修正: LSTMの信頼度もconfidenceに反映
+            confidence = min(len(sequence) / self.sequence_length, 1.0) * confidence_val
+
             return final_pos, kalman_pos, confidence
-        
+
         return None, None, 0.0
     
     def compute_hybrid_reid_score(self, track_id, detection_position, detection_velocity=None):

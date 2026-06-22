@@ -1,4 +1,3 @@
-# 以下はobject_tracking.pyのコードです。
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -179,16 +178,15 @@ class ObjectTracker:
     def compute_enhanced_matching_cost(self, detection, track_id):
         """距離と方向を考慮したマッチングコストを計算（LSTM予測も含む）"""
         if track_id not in self.track_history or len(self.track_history[track_id]) == 0:
-            return float('inf')
-        
-        # 基本的な距離コスト
+            return float('inf'), float('inf'), 0.0, 0.0, 0.0
+
         old_bbox = self.track_history[track_id][-1]
         distance = np.linalg.norm(detection[:2] - old_bbox[:2])
-        
-        # ===== 改善7: 距離閾値を拡大 =====
-        if distance > 300:  # 250 → 300に拡大（より遠くてもマッチング可能）
-            return float('inf')
-        
+
+        if distance > 300:
+            return float('inf'), float('inf'), 0.0, 0.0, 0.0
+
+
         # 方向コスト
         direction_cost = 0.0
         if self.use_direction_matching:
@@ -879,7 +877,7 @@ class ObjectTracker:
 
 if __name__ == "__main__":
     model_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/train_results/weights/best.pt"
-    video_path = "/Users/rin/Documents/畢業專題/YOLO/video/test/9min_3D_left.mp4"
+    video_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/testvideo/output_right (online-video-cutter.com).mp4"
     ground_truth_path = "/Users/rin/Documents/畢業專題/yolo_detect_zebrafish/evaluate_mot_system/ground_truth/semi_auto.txt"
     
     enable_evaluation = ground_truth_path is not None and os.path.exists(ground_truth_path)
