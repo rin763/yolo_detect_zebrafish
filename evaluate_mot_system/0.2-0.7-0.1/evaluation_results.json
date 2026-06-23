@@ -1,0 +1,12 @@
+{
+  "MOTA": 0.9701822916666667,
+  "MOTP": 0.8004890347168678,
+  "IDF1": 0.36283489025420823,
+  "ID_Switches": 658,
+  "Fragmentations": 360,
+  "True_Positives": 106428,
+  "False_Positives": 1456,
+  "False_Negatives": 1092,
+  "Total_Frames": 10800,
+  "Avg_Track_Length": 10642.8
+}
